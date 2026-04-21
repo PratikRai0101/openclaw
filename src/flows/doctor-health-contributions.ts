@@ -68,6 +68,7 @@ export type DoctorConfigResult = {
   path?: string;
   shouldWriteConfig?: boolean;
   sourceConfigValid?: boolean;
+  sourceConfig?: Record<string, unknown>;
 };
 
 export type DoctorHealthFlowContext = {
@@ -454,6 +455,10 @@ async function runWriteConfigHealth(ctx: DoctorHealthFlowContext): Promise<void>
       command: "doctor",
       mode: resolveDoctorMode(ctx.cfg),
     });
+    // Merge with source config to preserve unknown keys during repair
+    if (ctx.configResult.sourceConfig && typeof ctx.configResult.sourceConfig === "object") {
+      ctx.cfg = { ...ctx.configResult.sourceConfig, ...ctx.cfg } as OpenClawConfig;
+    }
     await writeConfigFile(ctx.cfg);
     logConfigUpdated(ctx.runtime);
     const backupPath = `${CONFIG_PATH}.bak`;
