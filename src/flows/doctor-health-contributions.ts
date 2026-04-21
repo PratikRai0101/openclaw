@@ -511,6 +511,10 @@ async function runWriteConfigHealth(ctx: DoctorHealthFlowContext): Promise<void>
         "gateway",
         "memory",
         "mcp",
+        // Legacy roots that may have been removed by doctor; treat them as
+        // known top-level keys to avoid resurrecting them from disk.
+        "memorySearch",
+        "heartbeat",
       ]);
 
       const isPlainObject = (v: unknown): v is Record<string, unknown> =>
@@ -526,6 +530,10 @@ async function runWriteConfigHealth(ctx: DoctorHealthFlowContext): Promise<void>
         const t = target;
         const s = source;
         for (const [k, v] of Object.entries(s)) {
+          // Prevent prototype pollution via specially-named keys.
+          if (k === "__proto__" || k === "constructor" || k === "prototype") {
+            continue;
+          }
           if (isPlainObject(v)) {
             if (!isPlainObject(t[k])) {
               t[k] = structuredClone(v);
@@ -546,6 +554,10 @@ async function runWriteConfigHealth(ctx: DoctorHealthFlowContext): Promise<void>
 
       const src = ctx.configResult.sourceConfig;
       for (const [key, val] of Object.entries(src)) {
+        // Block prototype-pollution style keys
+        if (key === "__proto__" || key === "constructor" || key === "prototype") {
+          continue;
+        }
         if (!KNOWN_TOP_LEVEL.has(key)) {
           const cfgRecord = ctx.cfg as Record<string, unknown>;
           if (cfgRecord[key] === undefined) {
