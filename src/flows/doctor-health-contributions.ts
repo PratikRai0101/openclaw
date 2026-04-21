@@ -568,7 +568,12 @@ async function runWriteConfigHealth(ctx: DoctorHealthFlowContext): Promise<void>
         }
       }
     }
-    await writeConfigFile(ctx.cfg);
+    // When doctor repairs the on-disk config we may intentionally preserve
+    // unknown/custom top-level keys that the strict runtime schema would
+    // otherwise reject. We must not call the runtime parser here; instead
+    // persist the merged result and skip strict validation. The write helper
+    // supports skipValidation for this purpose.
+    await writeConfigFile(ctx.cfg, { skipValidation: true });
     logConfigUpdated(ctx.runtime);
     const backupPath = `${CONFIG_PATH}.bak`;
     if (fs.existsSync(backupPath)) {
