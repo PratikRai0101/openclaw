@@ -573,7 +573,7 @@ async function runWriteConfigHealth(ctx: DoctorHealthFlowContext): Promise<void>
     // otherwise reject. We must not call the runtime parser here; instead
     // persist the merged result and skip strict validation. The write helper
     // supports skipValidation for this purpose.
-    await writeConfigFile(ctx.cfg, { skipValidation: true });
+    await writeConfigFile(ctx.cfg, { skipValidation: true, skipRuntimeSnapshotRefresh: true });
     logConfigUpdated(ctx.runtime);
     const backupPath = `${CONFIG_PATH}.bak`;
     if (fs.existsSync(backupPath)) {
