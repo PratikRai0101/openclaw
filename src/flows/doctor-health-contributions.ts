@@ -47,8 +47,15 @@ import { MEMORY_SYSTEM_PROMPT, shouldSuggestMemorySystem } from "../commands/doc
 import { noteOpenAIOAuthTlsPrerequisites } from "../commands/oauth-tls-preflight.js";
 import { applyWizardMetadata, randomToken } from "../commands/onboard-helpers.js";
 import { ensureSystemdUserLingerInteractive } from "../commands/systemd-linger.js";
-import { CONFIG_PATH, readConfigFileSnapshot, writeConfigFile } from "../config/config.js";
+import {
+  CONFIG_PATH,
+  readConfigFileSnapshot,
+  writeConfigFile,
+  getRuntimeConfig,
+} from "../config/config.js";
+import { createMergePatch, projectSourceOntoRuntimeShape } from "../config/io.write-prepare.js";
 import { logConfigUpdated } from "../config/logging.js";
+import { applyMergePatch } from "../config/merge-patch.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveSecretInputRef } from "../config/types.secrets.js";
 import { resolveGatewayService } from "../daemon/service.js";
@@ -455,9 +462,26 @@ async function runWriteConfigHealth(ctx: DoctorHealthFlowContext): Promise<void>
       command: "doctor",
       mode: resolveDoctorMode(ctx.cfg),
     });
-    // Merge with source config to preserve unknown keys during repair
-    if (ctx.configResult.sourceConfig && typeof ctx.configResult.sourceConfig === "object") {
-      ctx.cfg = { ...ctx.configResult.sourceConfig, ...ctx.cfg } as OpenClawConfig;
+    // Merge with source config to preserve unknown keys during repair, using
+    // the established merge-patch utilities. We intentionally avoid a naive
+    // shallow spread (e.g. `{ ...raw, ...repaired }`) because that would
+    // resurrect keys the doctor intentionally removed and would not perform a
+    // deep merge of nested custom keys. Instead we:
+    // 1) compute a merge-patch from the runtime snapshot -> repaired config
+    //    (createMergePatch) so deletions are represented as `null` in the
+    //    patch, and
+    // 2) project the original source onto the runtime shape and apply the
+    //    patch (applyMergePatch). This mirrors the config write pipeline and
+    //    preserves nested unknown/custom keys while honoring deletions made by
+    //    the doctor (they will not be resurrected).
+    if (ctx.configResult.sourceConfig) {
+      const runtimeSnapshot = getRuntimeConfig();
+      const runtimePatch = createMergePatch(runtimeSnapshot, ctx.cfg);
+      const projectedSource = projectSourceOntoRuntimeShape(
+        ctx.configResult.sourceConfig,
+        runtimeSnapshot,
+      );
+      ctx.cfg = applyMergePatch(projectedSource, runtimePatch) as OpenClawConfig;
     }
     await writeConfigFile(ctx.cfg);
     logConfigUpdated(ctx.runtime);
