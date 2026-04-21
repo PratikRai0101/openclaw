@@ -168,6 +168,13 @@ export type ConfigWriteOptions = {
    * Normal writers must keep this false so clobbers are rejected before disk commit.
    */
   allowDestructiveWrite?: boolean;
+  /**
+   * When true, skip strict schema validation of the persist candidate before
+   * writing. This is used by doctor flows which may intentionally preserve
+   * unknown top-level keys during repair and must avoid triggering strict
+   * validation that would reject those custom keys. Use with care.
+   */
+  skipValidation?: boolean;
 };
 
 export type ReadConfigFileSnapshotForWriteResult = {
@@ -1532,18 +1539,21 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
       }
     }
 
-    const validated = validateConfigObjectRawWithPlugins(persistCandidate, { env: deps.env });
-    if (!validated.ok) {
-      const issue = validated.issues[0];
-      const pathLabel = issue?.path ? issue.path : "<root>";
-      const issueMessage = issue?.message ?? "invalid";
-      throw new Error(formatConfigValidationFailure(pathLabel, issueMessage));
-    }
-    if (validated.warnings.length > 0) {
-      const details = validated.warnings
-        .map((warning) => `- ${warning.path}: ${warning.message}`)
-        .join("\n");
-      deps.logger.warn(`Config warnings:\n${details}`);
+    let validated: ReturnType<typeof validateConfigObjectRawWithPlugins> | null = null;
+    if (!options.skipValidation) {
+      validated = validateConfigObjectRawWithPlugins(persistCandidate, { env: deps.env });
+      if (!validated.ok) {
+        const issue = validated.issues[0];
+        const pathLabel = issue?.path ? issue.path : "<root>";
+        const issueMessage = issue?.message ?? "invalid";
+        throw new Error(formatConfigValidationFailure(pathLabel, issueMessage));
+      }
+      if (validated.warnings.length > 0) {
+        const details = validated.warnings
+          .map((warning) => `- ${warning.path}: ${warning.message}`)
+          .join("\n");
+        deps.logger.warn(`Config warnings:\n${details}`);
+      }
     }
 
     // Restore ${VAR} env var references that were resolved during config loading.
@@ -1927,6 +1937,8 @@ export async function writeConfigFile(
     unsetPaths: options.unsetPaths,
     allowDestructiveWrite: options.allowDestructiveWrite,
     skipRuntimeSnapshotRefresh: options.skipRuntimeSnapshotRefresh,
+    // Preserve caller intent for skipping validation when writing.
+    skipValidation: options.skipValidation,
   });
   if (
     options.skipRuntimeSnapshotRefresh &&
