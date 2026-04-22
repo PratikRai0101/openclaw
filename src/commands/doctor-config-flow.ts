@@ -3,10 +3,6 @@ import { findLegacyConfigIssues } from "../config/legacy.js";
 import { CONFIG_PATH } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isPlainObject } from "../infra/plain-object.js";
-import {
-  collectRelevantDoctorPluginIds,
-  listPluginDoctorLegacyConfigRules,
-} from "../plugins/doctor-contract-registry.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { note } from "../terminal/note.js";
 import { noteOpencodeProviderOverrides } from "./doctor-config-analysis.js";

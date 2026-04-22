@@ -478,6 +478,7 @@ async function runWriteConfigHealth(ctx: DoctorHealthFlowContext): Promise<void>
     //     schema), deep-merge/preserve it onto the repaired config.
     //   - if the key is known, do not copy anything from the source (this
     //     prevents resurrecting deleted core keys).
+    let restoredUnknownKeys = false;
     if (ctx.configResult.sourceConfig) {
       const KNOWN_TOP_LEVEL = new Set<string>([
         "$schema",
@@ -566,6 +567,7 @@ async function runWriteConfigHealth(ctx: DoctorHealthFlowContext): Promise<void>
           continue;
         }
         if (!KNOWN_TOP_LEVEL.has(key)) {
+          restoredUnknownKeys = true;
           const cfgRecord = ctx.cfg as Record<string, unknown>;
           if (cfgRecord[key] === undefined) {
             cfgRecord[key] = structuredClone(val);
@@ -580,7 +582,10 @@ async function runWriteConfigHealth(ctx: DoctorHealthFlowContext): Promise<void>
     // otherwise reject. We must not call the runtime parser here; instead
     // persist the merged result and skip strict validation. The write helper
     // supports skipValidation for this purpose.
-    await writeConfigFile(ctx.cfg, { skipValidation: true, skipRuntimeSnapshotRefresh: true });
+    await writeConfigFile(ctx.cfg, {
+      skipValidation: restoredUnknownKeys,
+      skipRuntimeSnapshotRefresh: restoredUnknownKeys,
+    });
     logConfigUpdated(ctx.runtime);
     const backupPath = `${CONFIG_PATH}.bak`;
     if (fs.existsSync(backupPath)) {
