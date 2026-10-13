@@ -252,6 +252,17 @@ export async function handleCompactCommand(
     return failure;
   }
   assertOwnerBeforeAcceptance();
+  // Manual compaction is non-idempotent: it can abort the active run and issue
+  // paid provider requests. Adopt before that work so the ingress watchdog
+  // cannot abort-and-replay the command; adoption loss (guillotine/supersede)
+  // throws and must prevent the effect. A successful adoption still leaves the
+  // caller abort signal live for explicit cancellation.
+  await params.opts?.turnAdoptionLifecycle?.onAdopted();
+  failure = authorityFailure();
+  if (failure) {
+    return failure;
+  }
+  assertOwnerBeforeAcceptance();
   if (runtime.isEmbeddedAgentRunAbortableForCompaction(sessionId)) {
     // Preserve the pending answer when the active turn can finish on its own.
     const settled = await runtime.waitForEmbeddedAgentRunEnd(sessionId, 60_000);

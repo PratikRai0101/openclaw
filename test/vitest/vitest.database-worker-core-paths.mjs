@@ -223,6 +223,7 @@ export const databaseWorkerCoreTestFiles = [
   "src/channels/message/ingress-queue.claim-ownership.test.ts",
   "src/channels/message/ingress-queue.pruning.test.ts",
   "src/channels/message/ingress-queue.test.ts",
+  "src/auto-reply/reply/commands-compact.ingress-adoption.test.ts",
   "src/auto-reply/reply/dispatch-from-config.command-refusal.test.ts",
   "src/auto-reply/reply/dispatch-from-config.ingress-retry.test.ts",
   "src/auto-reply/reply/reply-turn-admission.database-claim.test.ts",
