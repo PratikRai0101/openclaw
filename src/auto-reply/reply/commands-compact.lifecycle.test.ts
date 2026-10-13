@@ -1,5 +1,6 @@
 // Tests compact-command session authority across awaited lifecycle transitions.
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { IngressAdoptionLostError } from "../../channels/message/ingress-drain-state.js";
 import {
   abortEmbeddedAgentRun,
   buildCompactParams,
@@ -28,6 +29,162 @@ function buildLifecycleParams(overrides: Partial<HandleCommandsParams> = {}): Ha
 
 describe("handleCompactCommand lifecycle authority", () => {
   beforeEach(resetCompactCommandMocks);
+
+  it("keeps ingress recovery through the read-only wait, then adopts before interrupting", async () => {
+    const order: string[] = [];
+    vi.mocked(isEmbeddedAgentRunAbortableForCompaction).mockReturnValueOnce(true);
+    vi.mocked(waitForEmbeddedAgentRunEnd).mockImplementationOnce(async () => {
+      order.push("drain");
+      return false;
+    });
+    vi.mocked(abortEmbeddedAgentRun).mockImplementationOnce(() => {
+      order.push("abort");
+      return true;
+    });
+    vi.mocked(compactEmbeddedAgentSession).mockImplementationOnce(async () => {
+      order.push("compact");
+      return { ok: true, compacted: false };
+    });
+
+    const result = await handleCompactCommand(
+      buildLifecycleParams({
+        opts: {
+          turnAdoptionLifecycle: {
+            onAdopted: async () => {
+              order.push("adopt");
+            },
+          },
+        },
+      }),
+      true,
+    );
+
+    expect(order).toEqual(["drain", "adopt", "abort", "compact"]);
+    expect(result?.reply?.text).toContain("Compaction skipped");
+  });
+
+  it("adopts only before compacting when the active run ends naturally", async () => {
+    const order: string[] = [];
+    vi.mocked(isEmbeddedAgentRunAbortableForCompaction).mockReturnValueOnce(true);
+    vi.mocked(waitForEmbeddedAgentRunEnd).mockImplementationOnce(async () => {
+      order.push("drain");
+      return true;
+    });
+    vi.mocked(compactEmbeddedAgentSession).mockImplementationOnce(async () => {
+      order.push("compact");
+      return { ok: true, compacted: false };
+    });
+
+    await handleCompactCommand(
+      buildLifecycleParams({
+        opts: {
+          turnAdoptionLifecycle: {
+            onAdopted: async () => {
+              order.push("adopt");
+            },
+          },
+        },
+      }),
+      true,
+    );
+
+    expect(order).toEqual(["drain", "adopt", "compact"]);
+    expect(abortEmbeddedAgentRun).not.toHaveBeenCalled();
+  });
+
+  it("does not interrupt or compact after losing ingress adoption", async () => {
+    vi.mocked(isEmbeddedAgentRunAbortableForCompaction).mockReturnValueOnce(true);
+    vi.mocked(waitForEmbeddedAgentRunEnd).mockResolvedValueOnce(false);
+
+    const operation = handleCompactCommand(
+      buildLifecycleParams({
+        opts: {
+          turnAdoptionLifecycle: {
+            onAdopted: async () => {
+              throw new IngressAdoptionLostError("guillotined");
+            },
+          },
+        },
+      }),
+      true,
+    );
+
+    await expect(operation).rejects.toThrow("ingress adoption lost: guillotined");
+    expect(abortEmbeddedAgentRun).not.toHaveBeenCalled();
+    expect(compactEmbeddedAgentSession).not.toHaveBeenCalled();
+    expect(incrementCompactionCount).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the captured channel owner after ingress adoption", async () => {
+    let adopted = false;
+    vi.mocked(isEmbeddedAgentRunAbortableForCompaction).mockReturnValueOnce(true);
+
+    const operation = handleCompactCommand(
+      buildLifecycleParams({
+        command: {
+          ...buildCompactParams("/compact", {}).command,
+          assertOwnerCurrent: () => {
+            if (adopted) {
+              throw new Error("Channel operator authority changed; send a new request.");
+            }
+          },
+        },
+        opts: {
+          turnAdoptionLifecycle: {
+            onAdopted: async () => {
+              adopted = true;
+            },
+          },
+        },
+      }),
+      true,
+    );
+
+    await expect(operation).rejects.toThrow("Channel operator authority changed");
+    expect(abortEmbeddedAgentRun).not.toHaveBeenCalled();
+    expect(compactEmbeddedAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("rechecks caller authority after ingress adoption before touching the active run", async () => {
+    const controller = new AbortController();
+    vi.mocked(isEmbeddedAgentRunAbortableForCompaction).mockReturnValueOnce(true);
+
+    const result = await handleCompactCommand(
+      buildLifecycleParams({
+        opts: {
+          abortSignal: controller.signal,
+          turnAdoptionLifecycle: {
+            onAdopted: async () => {
+              controller.abort();
+            },
+          },
+        },
+      }),
+      true,
+    );
+
+    expect(result?.sessionCompaction).toEqual({
+      compacted: false,
+      reason: "command invocation closed",
+    });
+    expect(abortEmbeddedAgentRun).not.toHaveBeenCalled();
+    expect(compactEmbeddedAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("does not adopt ownership for a command that cannot name its session", async () => {
+    const onAdopted = vi.fn(async () => {});
+
+    const result = await handleCompactCommand(
+      buildLifecycleParams({
+        sessionEntry: undefined,
+        opts: { turnAdoptionLifecycle: { onAdopted } },
+      }),
+      true,
+    );
+
+    expect(result?.sessionCompaction).toEqual({ compacted: false, reason: "missing session id" });
+    expect(onAdopted).not.toHaveBeenCalled();
+  });
 
   it("rejects owner revocation while compaction waits for the active run to drain", async () => {
     let ownerCurrent = true;
