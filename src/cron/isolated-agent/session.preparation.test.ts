@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import path from "node:path";
 import type { Worker } from "node:worker_threads";
@@ -7,8 +8,9 @@ import { observeHostDataSql } from "../../../test/helpers/sqlite-statement-execu
 import { getCliSessionBinding } from "../../config/sessions/cli-session-binding.js";
 import { writeSessionEntry } from "../../config/sessions/session-accessor.sqlite-entry-store.js";
 import { replaceSessionEntrySync } from "../../config/sessions/session-accessor.sqlite-entry.js";
-import { replaceTranscriptEventsSync } from "../../config/sessions/session-accessor.sqlite-transcript-write.js";
+import { replaceTranscriptEventsSync } from "../../config/sessions/session-accessor.sqlite-transcript-write.test-support.js";
 import { readSessionEntriesFromStoreInWorker } from "../../config/sessions/session-entry-read-runtime.js";
+import { sessionChanges } from "../../sessions/session-row-changes.js";
 import { closeOpenClawAgentDatabaseByPathAsync } from "../../state/openclaw-agent-db-lifecycle.js";
 import { openOpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import {
@@ -144,10 +146,14 @@ it("rejects a read revoked during dispatch and joins worker close", async () => 
   const database = openOpenClawAgentDatabase({ agentId: "main", env: state.env });
   const sessionKey = "agent:main:cron:closed";
   writeSessionEntry(database, sessionKey, { sessionId: "closed-session", updatedAt: 1 });
+  // Exercise worker dispatch rather than the retained row-facts hit.
+  sessionChanges.invalidate({ sessionKey, storePath: database.path, factsInvalidated: true });
   let closing: Promise<boolean> | undefined;
+  // The close comes from outside the read, not from the read's writer FIFO context.
+  const runExternalClose = AsyncLocalStorage.snapshot();
   observed.dispatch = () => {
     observed.dispatch = undefined;
-    closing = closeOpenClawAgentDatabaseByPathAsync(database.path, "main");
+    closing = runExternalClose(() => closeOpenClawAgentDatabaseByPathAsync(database.path, "main"));
   };
   await expect(
     readSessionEntriesFromStoreInWorker({
@@ -155,6 +161,7 @@ it("rejects a read revoked during dispatch and joins worker close", async () => 
       env: state.env,
       storePath: database.path,
       sessionKeys: [sessionKey],
+      lifecycleSessionKey: sessionKey,
       projection: "full",
     }),
   ).rejects.toThrow(/revoked/);
@@ -174,6 +181,7 @@ it("rejects a configured alias redirected while its read is in flight", async ()
   const sessionKey = "agent:main:cron:alias";
   writeSessionEntry(database, sessionKey, { sessionId: "original-source", updatedAt: 1 });
   writeSessionEntry(replacement, sessionKey, { sessionId: "replacement-source", updatedAt: 1 });
+  sessionChanges.invalidate({ sessionKey, storePath: database.path, factsInvalidated: true });
   const alias = state.path("alias-full");
   fs.symlinkSync(state.stateDir, alias, "junction");
   observed.dispatch = () => {
@@ -187,6 +195,7 @@ it("rejects a configured alias redirected while its read is in flight", async ()
       env: state.env,
       storePath: path.join(alias, "agents", "main", "agent", "openclaw-agent.sqlite"),
       sessionKeys: [sessionKey],
+      lifecycleSessionKey: sessionKey,
       projection: "full",
     }),
   ).rejects.toThrow(/outside captured discovery custody/);

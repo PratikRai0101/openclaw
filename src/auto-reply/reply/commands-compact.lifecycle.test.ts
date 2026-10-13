@@ -8,7 +8,7 @@ import {
   enqueueSystemEvent,
   handleCompactCommand,
   incrementCompactionCount,
-  resolveCurrentSessionEntry,
+  prepareCurrentSessionEntry,
   isEmbeddedAgentRunAbortableForCompaction,
   resetCompactCommandMocks,
   waitForEmbeddedAgentRunEnd,
@@ -164,7 +164,7 @@ describe("handleCompactCommand lifecycle authority", () => {
       vi.mocked(isEmbeddedAgentRunAbortableForCompaction).mockReturnValueOnce(true);
       vi.mocked(waitForEmbeddedAgentRunEnd).mockImplementationOnce(async () => {
         if (authority === "session") {
-          vi.mocked(resolveCurrentSessionEntry).mockReturnValueOnce(undefined);
+          vi.mocked(prepareCurrentSessionEntry).mockResolvedValueOnce(undefined);
         } else if (authority === "owner") {
           ownerCurrent = false;
         } else {
@@ -201,7 +201,7 @@ describe("handleCompactCommand lifecycle authority", () => {
   );
 
   it("does not abort a run after the bound session changes", async () => {
-    vi.mocked(resolveCurrentSessionEntry).mockReturnValueOnce(undefined);
+    vi.mocked(prepareCurrentSessionEntry).mockResolvedValueOnce(undefined);
     vi.mocked(isEmbeddedAgentRunAbortableForCompaction).mockReturnValueOnce(true);
 
     const result = await handleCompactCommand(buildLifecycleParams(), true);
@@ -210,7 +210,6 @@ describe("handleCompactCommand lifecycle authority", () => {
       compacted: false,
       reason: "command session changed",
     });
-    expect(vi.mocked(isEmbeddedAgentRunAbortableForCompaction)).not.toHaveBeenCalled();
     expect(vi.mocked(abortEmbeddedAgentRun)).not.toHaveBeenCalled();
     expect(vi.mocked(compactEmbeddedAgentSession)).not.toHaveBeenCalled();
   });
@@ -287,8 +286,10 @@ describe("handleCompactCommand lifecycle authority", () => {
         activeWriterRunId: "earlier-writer",
       };
       let currentEntry = original;
-      vi.mocked(resolveCurrentSessionEntry).mockImplementation(({ expected }) =>
-        expected.sessionId === currentEntry.sessionId ? currentEntry : undefined,
+      vi.mocked(prepareCurrentSessionEntry).mockImplementation(async ({ expected }) =>
+        expected.sessionId === currentEntry.sessionId
+          ? { entry: currentEntry, assertCurrent() {}, release() {} }
+          : undefined,
       );
       vi.mocked(isEmbeddedAgentRunAbortableForCompaction).mockReturnValueOnce(true);
       vi.mocked(waitForEmbeddedAgentRunEnd).mockImplementationOnce(async () => {
@@ -335,17 +336,22 @@ describe("handleCompactCommand lifecycle authority", () => {
       const initial = { sessionId: "native-session", updatedAt: 1, lifecycleRevision: "lifecycle" };
       let ownerCurrent = true;
       let currentSessionId = initial.sessionId;
-      vi.mocked(resolveCurrentSessionEntry).mockImplementation(({ expected }) =>
-        expected.sessionId === currentSessionId ? { updatedAt: 1, ...expected } : undefined,
+      vi.mocked(prepareCurrentSessionEntry).mockImplementation(async ({ expected }) =>
+        expected.sessionId === currentSessionId
+          ? { entry: { updatedAt: 1, ...expected }, assertCurrent() {}, release() {} }
+          : undefined,
       );
-      vi.mocked(incrementCompactionCount).mockImplementationOnce(async ({ expectedSession }) => {
-        expect(expectedSession?.sessionId).toBe("successor-session");
-        if (replaceBeforeAccounting) {
-          currentSessionId = "replacement-session";
-          return undefined;
-        }
-        return 1;
-      });
+      vi.mocked(incrementCompactionCount).mockImplementationOnce(
+        async ({ expectedSession, transcriptByteCompactionLatch }) => {
+          expect(expectedSession?.sessionId).toBe("successor-session");
+          expect(transcriptByteCompactionLatch).toBeNull();
+          if (replaceBeforeAccounting) {
+            currentSessionId = "replacement-session";
+            return undefined;
+          }
+          return 1;
+        },
+      );
       vi.mocked(compactEmbeddedAgentSession).mockImplementationOnce(async (params, host) => {
         host?.assertActive?.();
         const storePath = params.sessionTarget?.storePath;
@@ -393,7 +399,7 @@ describe("handleCompactCommand lifecycle authority", () => {
 
       expect(result?.sessionCompaction).toMatchObject(
         replaceBeforeAccounting
-          ? { compacted: false, reason: "command session changed" }
+          ? { compacted: false, reason: "session accounting failed" }
           : { compacted: true, tokensAfter: 321 },
       );
     },

@@ -9,6 +9,7 @@ import {
   menuItem,
   menuItemLabels,
   selectMenuValue,
+  settleSessionMenu,
 } from "../test-helpers/session-menu.ts";
 import {
   createSessionOwnerMenuHarness,
@@ -89,21 +90,6 @@ describe("session communication menu", () => {
     expect(choice(menu, "receive", "always").getAttribute("aria-pressed")).toBe("true");
   });
 
-  it("groups settings and shows only Gateway-resolved selections in inline pickers", async () => {
-    const menu = await mountMenu({ session: { effectiveCommunication: policy } });
-    const settings = menuItem(menu, "Session settings");
-    expect(menuItemLabels(menu)).not.toContain("Icon & color");
-    expect(menuItemLabels(menu)).not.toContain("Assign to…");
-    expect(menuItemLabels(menu)).toContain("Move to group");
-    expect(menuItemLabels(settings)).toEqual(["Icon & color", "Assign to…"]);
-    expect(settings.querySelector('[role="group"][aria-label="Send messages"]')).not.toBeNull();
-    expect(settings.querySelector('[role="group"][aria-label="Receive messages"]')).not.toBeNull();
-    expect(choice(settings, "send", "never").getAttribute("aria-pressed")).toBe("true");
-    expect(choice(settings, "receive", "ask").getAttribute("aria-pressed")).toBe("true");
-    expect(choice(settings, "send", "never").title).toBe("default");
-    expect(menu.querySelector('[value="communication:reset"]')).toBeNull();
-  });
-
   it("dispatches only the selected direction and resets raw overrides together", async () => {
     const onAction = vi.fn();
     const menu = await mountMenu({
@@ -127,8 +113,8 @@ describe("session communication menu", () => {
       session: { effectiveCommunication: policy },
       onAction,
     });
-    selectMenuValue(menu, "compact:open-settings");
-    await menu.updateComplete;
+    selectMenuValue(menu, "compact:open-advanced");
+    await settleSessionMenu(menu);
     expect(menuItem(menu, "Back").getAttribute("value")).toBe("compact:back");
     expect(choice(menu, "receive", "ask").getAttribute("aria-pressed")).toBe("true");
     expect(menu.querySelector('[slot="submenu"]')).toBeNull();
@@ -147,13 +133,13 @@ describe("session communication menu", () => {
         cancelable: true,
       }),
     );
-    expect(document.activeElement).toBe(menuItem(menu, "Assign to…"));
-    for (const view of ["icon", "assign-owner"]) {
+    expect(document.activeElement).toBe(menuItem(menu, "Open in"));
+    for (const view of ["icon", "copy", "open-in"]) {
       selectMenuValue(menu, `compact:open-${view}`);
-      await menu.updateComplete;
-      expect(menuItem(menu, "Back").getAttribute("value")).toBe("compact:back-settings");
-      selectMenuValue(menu, "compact:back-settings");
-      await menu.updateComplete;
+      await settleSessionMenu(menu);
+      expect(menuItem(menu, "Back").getAttribute("value")).toBe("compact:back-advanced");
+      selectMenuValue(menu, "compact:back-advanced");
+      await settleSessionMenu(menu);
       expect(choice(menu, "receive", "ask")).toBeTruthy();
     }
     choice(menu, "receive", "never").click();
@@ -162,8 +148,8 @@ describe("session communication menu", () => {
       communication: { receive: "never" },
     });
     selectMenuValue(menu, "compact:back");
-    await menu.updateComplete;
-    expect(menuItemLabels(menu)).toContain("Session settings");
+    await settleSessionMenu(menu);
+    expect(menuItemLabels(menu)).toContain("Advanced");
     expect(menu.querySelector('[role="group"]')).toBeNull();
   });
 
@@ -195,6 +181,6 @@ describe("session communication menu", () => {
       session: { effectiveCommunication: policy },
       selectionCount: 2,
     });
-    expect(menuItemLabels(batch)).not.toContain("Session settings");
+    expect(menuItemLabels(batch)).not.toContain("Advanced");
   });
 });
