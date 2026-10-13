@@ -227,6 +227,9 @@ export async function handleCompactCommand(
   const assertOwnerBeforeAcceptance = () => {
     operatorAuthority?.assertCurrent();
     if (!compactionAccepted) {
+      // Captured channel-owner and plugin capability fences are separate from
+      // profile-backed operator authority; a revoked grant must not reach effects.
+      params.command.assertOwnerCurrent?.();
       assertOwnerCurrent?.();
     }
   };
@@ -252,6 +255,26 @@ export async function handleCompactCommand(
     return failure;
   }
   assertOwnerBeforeAcceptance();
+  // Manual compaction is non-idempotent: interrupting the active run or issuing
+  // summary requests must not be replayed by a successor. Adopt immediately
+  // before the first such effect -- not before the read-only natural wait, which
+  // stays recoverable -- and recheck authority after the adoption await.
+  // Adoption loss (guillotine/supersede) throws and must prevent the effect; a
+  // successful adoption still leaves the caller abort signal live.
+  let ingressAdopted = false;
+  const adoptIngressBeforeEffect = async (): Promise<CommandHandlerResult | undefined> => {
+    if (ingressAdopted) {
+      return undefined;
+    }
+    await params.opts?.turnAdoptionLifecycle?.onAdopted();
+    ingressAdopted = true;
+    failure = authorityFailure();
+    if (failure) {
+      return failure;
+    }
+    assertOwnerBeforeAcceptance();
+    return undefined;
+  };
   if (runtime.isEmbeddedAgentRunAbortableForCompaction(sessionId)) {
     // Preserve the pending answer when the active turn can finish on its own.
     const settled = await runtime.waitForEmbeddedAgentRunEnd(sessionId, 60_000);
@@ -261,6 +284,10 @@ export async function handleCompactCommand(
     }
     assertOwnerBeforeAcceptance();
     if (!settled) {
+      const adoptionFailure = await adoptIngressBeforeEffect();
+      if (adoptionFailure) {
+        return adoptionFailure;
+      }
       interruptionNotice = runtime.abortEmbeddedAgentRun(sessionId)
         ? "\n⚠️ Your in-flight request was aborted by compaction — please resend it."
         : "";
@@ -296,6 +323,10 @@ export async function handleCompactCommand(
     entry: refreshedEntry,
     cfg: params.cfg,
   });
+  const adoptionFailure = await adoptIngressBeforeEffect();
+  if (adoptionFailure) {
+    return adoptionFailure;
+  }
   const replyOperation = params.opts?.replyOperation;
   replyOperation?.setPhase("preflight_compacting");
   const assertActive = () => {
