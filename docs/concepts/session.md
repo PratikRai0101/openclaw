@@ -55,6 +55,15 @@ Stopping with `/stop`, deleting, resetting, or archiving a session cancels only 
 the selected conversation. Another agent's active turn and queued messages are
 preserved even when the agents use the same session key.
 
+## Automatic session names
+
+Interactive chat sessions without an explicit name generate a topic title in the
+background when the Gateway dispatches their message. Naming starts alongside
+worktree and reply preparation; it does not wait for the agent’s first progress
+event and does not block the turn. The name appears when the title model finishes.
+If the title request fails while overlapping a turn, it retries once after that
+turn settles. Explicit names and manual renames are preserved.
+
 ## DM isolation
 
 By default, all DMs share one session for continuity, which is fine for
@@ -90,7 +99,7 @@ those conversations stay isolated even under `main`. See
 
 <Tip>
 If the same person contacts you from multiple channels, use
-`session.identityLinks` to map their identities to one canonical peer id so
+`session.identityLinks` to map their identities to one shared peer id so
 they share a session.
 </Tip>
 
@@ -235,6 +244,8 @@ in the queue or preparing to execute, OpenClaw tries to continue the existing
 session automatically. Shutdown records recovery before canceling queued work.
 If restart cancellation finishes a collected run before that record commits,
 shutdown retains its recovery custody unless the session or run owner changes.
+Backend-owned restart aborts retain the same custody even when the caller's
+abort signal stays open and lifecycle persistence finishes after reply cleanup.
 Skipped sessions are logged with a reason, including when other sessions recover.
 Three attempts that fail to start a backend turn exhaust the recovery budget.
 Once a real backend turn starts,
@@ -436,14 +447,17 @@ logs one outcome with the before/after bytes and removal counts.
 An incomplete SQLite WAL checkpoint is a separate deferral. Cleanup preserves
 archives and history instead of deleting more data behind the blocked checkpoint.
 The result records `deferredReason: "checkpoint-incomplete"`, WAL bytes before and
-after, and the checkpoint outcome. Automatic and manual budget passes remain
-deferred until the checkpoint owner records completion after the pending cleanup
-work. Newer frames from concurrent writes do not erase that completion. Each SQLite cleanup
+after, and the checkpoint outcome. Manual cleanup and subsequent throttled
+automatic checks retry the checkpoint: an earlier blocked observation cannot
+suspend cleanup indefinitely when another connection completes a checkpoint
+without publishing its result. Cleanup still requires the checkpoint owner to
+record completion after the pending cleanup work. Newer frames from concurrent
+writes do not erase that completion. Each SQLite cleanup
 deletion or vacuum commit requires a new completion before further pruning, so a
 reader pinning those changes still defers cleanup. Ordering uses monotonic time;
 elapsed time, a budget change, or a system clock correction cannot release the gate.
-Normal periodic checkpointing continues, and subsequent activity can resume cleanup
-after recovery.
+Normal periodic checkpointing continues. A published completion allows the next
+activity to retry immediately; otherwise the normal check interval applies.
 
 Look for `session history disk budget deferred until a completed WAL checkpoint is observed`
 in the Gateway log. Its checkpoint fields include bounded operation names for

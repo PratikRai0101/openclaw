@@ -288,8 +288,10 @@ Memory retrieval workers borrow the existing agent read-only owner across query
 awaits and release each borrow before replying. The owner retains the idle reader
 and its prepared statements, with committed-write invalidation and physical-file
 replacement handled by its existing lifecycle. Vector-extension probing keeps a
-separate extension-capable connection. Search queries, ranking, result bounds,
-schemas, and update behavior are unchanged.
+separate extension-capable connection. Memory-origin and forgotten-session reads
+use the same retained reader owner instead of opening a connection per request;
+committed writes still refresh origin rows and tombstone membership. Search
+queries, ranking, result bounds, schemas, and update behavior are unchanged.
 
 Transcript readers retain bounded hot/cold facts under the existing session write
 receipts. Archive, restore, session deletion, and native writes invalidate those
@@ -306,10 +308,12 @@ facts; cold or invalidated actors use the canonical snapshot read. Trajectory
 append and trim touch no session fields and preserve those receipts. Transcript
 bodies and byte limits remain SQL-owned bounded reads.
 
-Participant projections carry an autocommit read into the metadata CAS owner's
-unchanged immediate write transaction. Ordinary readers establish their own native
-snapshot. Concurrent participant updates remain independent of metadata CAS. These
-caches change no schema, retention, stored format, or update behavior.
+Participant reads and entry projections reuse the session actor's complete committed
+participant records, including contribution counts and recency. The participant writer
+updates those records in its existing transaction and publishes them on commit;
+rollback retains the previous facts. Cold, evicted, or invalidated actors use the
+canonical participant read. Participant updates remain independent of metadata CAS.
+This changes no schema, retention, stored format, or update behavior.
 
 ## Session and ancillary worker operations
 
@@ -1718,8 +1722,15 @@ or update-format change.
 Qualified Gateway entry reads request lifecycle timestamps only when a consumer
 needs reset freshness. Metadata, observer, and native model ownership reads use
 the existing single-statement entry facts without a deferred transaction.
-Restart-safe chat admission still requests lifecycle timestamps and retains the
-snapshot that joins entry facts with a legacy transcript-header fallback.
+Restart-safe chat admission still requests lifecycle timestamps. Current entry
+timestamps and runtime targets reuse receipt-backed actor facts; cold exact
+entry facts need only their single-statement snapshot. Legacy timestamp fallback
+reads the header for the captured session ID through the transcript owner's
+snapshot. An explicit concurrent transcript replacement can pair the captured
+entry with a newer header timestamp; the next read refreshes this descriptive
+metadata. Rich cohorts retain a shared snapshot for entry, parent, transcript,
+authorization, and cold-state facts. Category preparation is also a single SELECT;
+its existing write transaction rereads selected entries before applying changes.
 Schemas, stored bytes, permissions, and update behavior are unchanged.
 
 Current readers consume committed rows without a probe connection, version
@@ -4141,6 +4152,10 @@ WAL work pauses so Doctor and update-recovery captures keep stable source bytes.
 Explicitly admitted maintenance remains available. The final maintenance client
 release resumes the same worker's normal ten-second checkpoint cadence; overlapping
 maintenance clients keep it paused until all release.
+When another process holds offline maintenance custody, the state owner check
+still refuses each scheduled pass. That refusal skips the pass without recording a
+checkpoint failure or warning; health keeps its last real observation and the next
+tick retries.
 
 The Gateway run loop retains the shared-state database cache, actor owner, and
 SQLite worker broker until the final lifecycle outcome is recorded. Orderly
@@ -6547,7 +6562,11 @@ separate worker migration.
 Shared and per-agent auth-profile success and failure bookkeeping use the existing
 auth-profile shared-state domain and canonical agent executor. The caller captures
 the physical stores and execution authority before preparing inherited ownership
-and provider observations. Workers reread the current rows and apply the same health
+and provider observations. Overlapping health preparations remain ordered, but
+candidate stores do not reserve the database writer while read-only children load
+rows or provider probes run. Only a ready write joins its selected database FIFO;
+unrelated session writes can proceed during preparation. Workers reread the current
+rows and apply the same health
 reducers used for personal model accounts; inherited success clears health without
 changing the shared owner's last-good selection or rotation time. Committed facts
 update the existing runtime snapshot owner. Gateway close refuses new bookkeeping
@@ -6555,6 +6574,34 @@ and joins accepted operations before closing worker transports. Uncertain outcom
 are never replayed. Schemas, stored bytes, retention, and update behavior are
 unchanged. The released synchronous auth-store save SDK remains available; quota
 reprobe and explicit block mutations retain their existing owners.
+
+Personal, shared, and per-agent Codex token-sharing credentials use the same
+credential authority owner. Cold preparation reads through the existing auth
+workers and retains source precedence, including an absent local profile that
+could later override shared credentials. The final bearer-fetch guard consumes
+current owner-held facts synchronously, with no SQLite statements or worker
+requests. Fingerprint, selected-profile, and validated pending-refresh checks
+remain at their existing boundaries; a persisted credential without retained
+authority is refused rather than recovered from a prepared snapshot.
+
+Credential writers begin publication synchronously before the durable effect.
+Worker admission denies the host guard before commit, and committed postimages
+or deletions reach the owner before settlement releases that denial. Native
+compatibility writers use the same publication ordering. A known rollback keeps
+the prior facts; an unknown outcome denies credential effects until owner restart,
+even if a later write succeeds. Usage, order, and cooldown-only changes do not
+revoke the retained credential. Catalog settlement carries its credential facts
+through the existing transport; it does not grant authority from a worker snapshot.
+
+Writer-entry custody covers login, import, setup, provider persistence, OAuth
+claim and settlement, logout, external-CLI synchronization, secrets apply and
+rollback, Doctor and relocation, catalog writes, and generic machine-state writes
+that accept the credential key. The custody ratchet checks the reviewed entry
+edges, including released synchronous SDK writers, whose signatures remain
+unchanged. Their synchronous reader still reaches the native auth JSON primitives,
+so those static T1 sites remain SDK compatibility debt. The Codex final guard no
+longer uses that native reader. Schemas, stored bytes, retention, and update behavior
+are unchanged.
 
 Runtime auth-source detection uses the existing agent and shared auth readers.
 It captures both possible shared-store targets before yielding and retains the

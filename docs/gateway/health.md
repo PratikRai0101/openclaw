@@ -47,6 +47,12 @@ agents still preparing and `stage` identifies the current acquisition phase.
 The Gateway remains running and completed agents remain usable. Background
 preparation clears the degraded status when all runtimes are ready.
 
+Transcript projection repair runs after readiness in yielding worker-backed work.
+An agent deferred by database inspection becomes usable after its session,
+credentials, and model preparation finish; rebuilding its transcript projections
+does not hold agent admission or another agent's preparation. Shutdown still joins
+accepted repair work, and repair failures are logged without withdrawing admission.
+
 Health and status collection groups fast session-store reads into short work
 slices, keeping busy background preparation from delaying every individual read.
 Slow reads finish their transaction before yielding to other Gateway work.
@@ -242,7 +248,7 @@ When no `x-openclaw-session-key` header or `user` field is provided, `/v1/chat/c
 
 - `logged out` or status 409-515 -> relink with `openclaw channels logout` then `openclaw channels login`.
 - Gateway unreachable -> start it: `openclaw gateway --port 18789` (use `--force` if the port is busy).
-- No inbound messages -> confirm linked phone is online and the sender is allowed (`channels.whatsapp.allowFrom`); for group chats, ensure allowlist + mention rules match (`channels.whatsapp.groups`, `agents.entries.*.groupChat.mentionPatterns`).
+- No inbound messages -> confirm linked phone is online and the sender is allowed (`channels.whatsapp.allowFrom`); for group chats, check that allowlist + mention rules match (`channels.whatsapp.groups`, `agents.entries.*.groupChat.mentionPatterns`).
 
 ## Dedicated "health" command
 
