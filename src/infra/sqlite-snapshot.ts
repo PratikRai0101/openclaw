@@ -1,5 +1,4 @@
 // Creates verified SQLite snapshots, compacting by default.
-import { randomUUID } from "node:crypto";
 import fsSync, { type BigIntStats, type Stats } from "node:fs";
 import fs from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
@@ -43,6 +42,7 @@ import {
   withSqliteSnapshotSource,
 } from "./sqlite-snapshot-source.js";
 import { readSqliteUserVersion } from "./sqlite-user-version.js";
+import { configureSqliteSnapshotPragmas } from "./sqlite-wal.js";
 
 export type SqliteSnapshotValidator = (database: DatabaseSync, databaseLabel: string) => void;
 
@@ -187,6 +187,38 @@ async function syncFile(filePath: string): Promise<void> {
   }
 }
 
+/** Only the native updater's stopped, checkpointed inventory may use raw file capture. */
+export async function createStoppedSqliteSnapshot(options: {
+  sourcePath: string;
+  targetPath: string;
+  sourceIdentity: BigIntStats;
+}): Promise<VerifiedSqliteSnapshot> {
+  if (options.sourceIdentity.size === 0n) {
+    throw new Error(`SQLite snapshot source must not be empty: ${options.sourcePath}`);
+  }
+  const publication = await copySqliteFile(
+    options.sourcePath,
+    options.targetPath,
+    options.sourceIdentity,
+  );
+  const snapshot = openNodeSqliteDatabase(options.targetPath);
+  let userVersion: number;
+  try {
+    configureSqliteSnapshotPragmas(snapshot);
+    userVersion = readSqliteUserVersion(snapshot);
+  } finally {
+    snapshot.close();
+  }
+  const identity = await fs.lstat(options.targetPath, { bigint: true });
+  if (!sameFileIdentity(publication, identity) || identity.size !== options.sourceIdentity.size) {
+    throw new Error(`SQLite snapshot file changed: ${options.targetPath}`);
+  }
+  await syncFile(options.targetPath);
+  // Restore requires this digest; the stopped owner checks source/journal stability separately.
+  const content = await hashPublishedFile(options.targetPath, identity);
+  return { path: options.targetPath, userVersion, ...content };
+}
+
 async function assertOpenFileIdentity(
   handle: FileHandle,
   filePath: string,
@@ -315,10 +347,7 @@ async function publishSqliteFile(
     stagingDir =
       consumeOwnedSource === "prepared"
         ? path.dirname(options.sourcePath)
-        : await createPrivateSqliteTempDirectory(
-            targetDirectory,
-            `.sqlite-publish-${randomUUID()}-`,
-          );
+        : await createPrivateSqliteTempDirectory(targetDirectory, ".sqlite-publish-");
   } catch (error) {
     await targetDirectoryPin.close().catch(() => undefined);
     throw error;
@@ -630,10 +659,9 @@ async function verifyAndPublishSqliteSnapshot(
     await fs.chmod(stagedPath, 0o600);
     const snapshot = openNodeSqliteDatabase(stagedPath);
     try {
-      snapshot.exec("PRAGMA busy_timeout = 30000; PRAGMA trusted_schema = OFF;");
       // Online backup preserves WAL mode. Switch the private copy to rollback
       // journaling so verification and restore need only the published file.
-      snapshot.exec("PRAGMA journal_mode = DELETE;");
+      configureSqliteSnapshotPragmas(snapshot);
       if (options.transform) {
         await options.transform(snapshot);
       }

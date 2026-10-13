@@ -49,6 +49,7 @@ import {
 } from "../../embedded-agent-utils.js";
 import { isTimeoutErrorMessage } from "../../failover/classify.js";
 import type { PreparedProviderFailoverOwner } from "../../failover/provider-patterns.js";
+import type { ReplyDeliveryState } from "../../reply-completion.js";
 import type { ToolErrorSummary } from "../../tool-error-summary.js";
 import {
   hasCompletedMessagingToolDeliveryEvidence,
@@ -56,6 +57,7 @@ import {
 } from "../delivery-evidence.js";
 import { buildSourceReplyPayloadState } from "./source-reply-payloads.js";
 import { buildFailureWarning } from "./tool-error-warning.js";
+import type { EmbeddedRunAttemptResult } from "./types.js";
 
 /**
  * Converts a completed embedded attempt into reply payloads for channels. This
@@ -74,6 +76,7 @@ export function buildEmbeddedRunPayloads(params: {
   currentAssistant?: AssistantMessage | null;
   lastToolError?: ToolErrorSummary;
   config?: OpenClawConfig;
+  sandboxRuntime?: EmbeddedRunAttemptResult["sandboxRuntime"];
   isCronTrigger?: boolean;
   isHeartbeatTrigger?: boolean;
   sessionKey: string;
@@ -88,6 +91,7 @@ export function buildEmbeddedRunPayloads(params: {
   toolResultFormat?: ToolResultFormat;
   didSendViaMessagingTool?: boolean;
   didDeliverSourceReplyViaMessageTool?: boolean;
+  sourceReplyDeliveryState?: ReplyDeliveryState;
   messagingToolSentTargets?: MessagingToolSend[];
   messagingToolSourceReplyPayloads?: MessagingToolSourceReplyPayload[];
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
@@ -122,8 +126,6 @@ export function buildEmbeddedRunPayloads(params: {
   );
   const replyItems = ordinarySourceReplies.replyItems;
   const pendingAuthoredReplies = new Set(sourceReplies.filter((payload) => payload.toolAuthored));
-  const { deliveredSourceReplyViaMessageTool, completedSourceReplyViaMessageTool } =
-    ordinarySourceReplies;
   if (params.heartbeatToolResponse) {
     const heartbeatPayload = createHeartbeatToolResponsePayload(params.heartbeatToolResponse);
     replyItems.push({
@@ -132,18 +134,8 @@ export function buildEmbeddedRunPayloads(params: {
     });
   }
   const useMarkdown = params.toolResultFormat === "markdown";
-  const suppressAssistantArtifacts =
-    params.heartbeatToolResponse !== undefined ||
-    params.didSendDeterministicApprovalPrompt === true ||
-    (params.sourceReplyDeliveryMode === "message_tool_only" &&
-      ordinarySourceReplies.hasSourceReplyPayload) ||
-    deliveredSourceReplyViaMessageTool;
-  const suppressFailureArtifacts =
-    params.didSendDeterministicApprovalPrompt === true ||
-    (params.sourceReplyDeliveryMode === "message_tool_only" &&
-      ordinarySourceReplies.completedSourceReplyViaMessageTool);
-  let hasUserFacingReply =
-    completedSourceReplyViaMessageTool || params.heartbeatToolResponse?.notify === true;
+  let suppressFailureArtifacts = false;
+  let hasUserFacingReply = false;
   let hasIntentionalSilentFinal = false;
   const appendSegmentAnswer = ({
     assistantTexts,
@@ -151,10 +143,35 @@ export function buildEmbeddedRunPayloads(params: {
     currentAssistant,
     assistantMessageIndex: terminalMessageIndex,
     keptAnswer,
+    sourceReplyDeliveryState,
   }: Pick<
     typeof params,
-    "assistantTexts" | "lastAssistant" | "currentAssistant" | "assistantMessageIndex" | "keptAnswer"
+    | "assistantTexts"
+    | "lastAssistant"
+    | "currentAssistant"
+    | "assistantMessageIndex"
+    | "keptAnswer"
+    | "sourceReplyDeliveryState"
   >) => {
+    // Delivery receipts span the attempt; canonical completion belongs to one input.
+    const completedSourceReplyViaMessageTool =
+      sourceReplyDeliveryState !== undefined
+        ? sourceReplyDeliveryState === "delivered"
+        : ordinarySourceReplies.completedSourceReplyViaMessageTool;
+    const deliveredSourceReplyViaMessageTool =
+      sourceReplyDeliveryState !== undefined
+        ? completedSourceReplyViaMessageTool
+        : ordinarySourceReplies.deliveredSourceReplyViaMessageTool;
+    const suppressAssistantArtifacts =
+      params.heartbeatToolResponse !== undefined ||
+      params.didSendDeterministicApprovalPrompt === true ||
+      (params.sourceReplyDeliveryMode === "message_tool_only" &&
+        ordinarySourceReplies.hasSourceReplyPayload) ||
+      (deliveredSourceReplyViaMessageTool &&
+        (params.sourceReplyDeliveryMode === "message_tool_only" ||
+          completedSourceReplyViaMessageTool));
+    suppressFailureArtifacts =
+      params.didSendDeterministicApprovalPrompt === true || completedSourceReplyViaMessageTool;
     // Silence belongs to this input's answer. An earlier steered input must not
     // hide a later input that actually failed without producing an answer.
     hasIntentionalSilentFinal = false;
@@ -208,6 +225,7 @@ export function buildEmbeddedRunPayloads(params: {
       providerOwner: params.providerOwner,
       model: params.model,
       authMode: params.authMode,
+      sandboxRuntime: params.sandboxRuntime,
     };
     const errorText =
       assistantForPayload && lastAssistantNeedsErrorSurface
@@ -362,6 +380,7 @@ export function buildEmbeddedRunPayloads(params: {
       currentAssistant: segment.lastAssistant,
       assistantMessageIndex: segment.messageEnd,
       keptAnswer: segment.keptAnswer,
+      sourceReplyDeliveryState: segment.sourceReplyDeliveryState,
     });
     for (const reply of replyItems.slice(replyStart)) {
       setReplyPayloadMetadata(reply, { precedingInputAnswer: true });
