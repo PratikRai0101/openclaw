@@ -12,6 +12,7 @@ import { SessionManager } from "../../agents/sessions/session-manager.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
 import { getRuntimeConfig } from "../../config/config.js";
 import { resolveInternalSessionEffectsIdentity } from "../../config/sessions/internal-session-key.js";
+import { retainPreparedSessionEntryPredicate } from "../../config/sessions/session-accessor.sqlite-entry-cache-publication-state.js";
 import {
   composeSessionSourceAssertion,
   type PreparedSessionSourceAuthority,
@@ -53,13 +54,13 @@ export async function prepareSkillExperienceReviewCandidate(
   ) {
     return undefined;
   }
-  const { resolveConversationCapabilityProfile } =
+  const { prepareConversationCapabilityProfile } =
     await import("../../agents/conversation-capability-profile.js");
   const { isToolAllowedByPolicies } = await import("../../agents/tool-policy-match.js");
   const { mergeAlsoAllowPolicy } = await import("../../agents/tool-policy.js");
   const foreground = candidate.ctx.foregroundPromptContext;
   const sessionKey = candidate.source.sessionKey;
-  const capabilityProfile = resolveConversationCapabilityProfile({
+  const capabilityProfile = await prepareConversationCapabilityProfile({
     config,
     sessionKey,
     sandboxSessionKey: sessionKey,
@@ -125,6 +126,13 @@ async function runSkillExperienceReviewInner(candidate: ExperienceReviewCandidat
   const readWriteToken = () =>
     readSqliteDatabaseScopedWriteTokenForPath(candidate.source.storePath, writeScopes);
   let validatedWriteToken: string | undefined;
+  using sourceLifetime: Disposable & {
+    entry?: ReturnType<typeof retainPreparedSessionEntryPredicate>;
+  } = {
+    [Symbol.dispose]() {
+      this.entry?.release();
+    },
+  };
 
   // Fork the foreground model context through the completed turn; the review's tool
   // schemas and prefix match the foreground so the provider prompt cache is reused.
@@ -132,6 +140,7 @@ async function runSkillExperienceReviewInner(candidate: ExperienceReviewCandidat
     source: typeof candidate.source,
     assertPhysicalCurrent: () => void,
     assertPreparationCurrent: () => void,
+    databaseIdentity?: string,
   ) => {
     const sessionManager = await SessionManager.openModelContextAsync(source, {
       cwd: workspaceDir,
@@ -159,6 +168,17 @@ async function runSkillExperienceReviewInner(candidate: ExperienceReviewCandidat
         }
         if (facts.contextValidated) {
           sourceEntry = current;
+          if (databaseIdentity) {
+            sourceLifetime.entry = retainPreparedSessionEntryPredicate({
+              databaseIdentity,
+              sessionKey,
+              entry: current,
+              matches: (_before, after) =>
+                after?.sessionId === current.sessionId &&
+                (after.lifecycleRevision ?? null) === (current.lifecycleRevision ?? null) &&
+                after.permissionMode === current.permissionMode,
+            });
+          }
           validatedWriteToken = readWriteToken();
         }
       },
@@ -188,7 +208,12 @@ async function runSkillExperienceReviewInner(candidate: ExperienceReviewCandidat
             );
           }
         };
-        return prepare({ ...candidate.source, ...scope }, assertSourceIdentity, assertCurrent);
+        return prepare(
+          { ...candidate.source, ...scope },
+          assertSourceIdentity,
+          assertCurrent,
+          expectedIdentity?.key,
+        );
       },
       abortSignal,
     );
@@ -202,6 +227,9 @@ async function runSkillExperienceReviewInner(candidate: ExperienceReviewCandidat
   };
   const assertScopeCurrent = () => {
     assertPhysicalCurrent();
+    if (sourceLifetime.entry && !sourceLifetime.entry.isCurrent()) {
+      throw new SessionTranscriptReadFenceError("Session review authority changed");
+    }
     if (resolveSkillWorkshopConfig(getRuntimeConfig()).autonomous.mode !== "auto") {
       throw new Error("Skill Workshop was turned off during review.");
     }
@@ -239,9 +267,14 @@ async function runSkillExperienceReviewInner(candidate: ExperienceReviewCandidat
   };
   const assertSourceCurrent = composeSessionSourceAssertion([
     Object.assign(
-      // An unprepared liveness check after a benign write may cancel this review;
-      // it must never authorize an effect using stale source permissions.
-      () => assertReceiptCurrent(validatedWriteToken),
+      () => {
+        // Model liveness follows admitted entry facts; each effect separately
+        // revalidates the completed-turn anchor and retains its exact write receipt.
+        assertScopeCurrent();
+        if (!sourceLifetime.entry) {
+          assertReceiptCurrent(validatedWriteToken);
+        }
+      },
       {
         assertScopeCurrent,
         prepareSessionSource: prepareSource,

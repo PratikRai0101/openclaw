@@ -284,16 +284,17 @@ readers and current-owner checks. The service exposes `listBySessionAsync`,
 synchronous fallback. External adapters remain responsible for their own
 storage, currentness, and committed publication.
 
-For channel route ownership, replace `resolveConversationRouteOwner` and
-`prepareConversationRouteOwners` with `prepareConversationRouteOwnersAsync`.
+For channel route ownership, replace `resolveConversationRouteOwner` with
+`prepareConversationRouteOwnersAsync`. The unreleased synchronous
+`prepareConversationRouteOwners` hook has been removed.
 Await its `inspectBindings(refs)` callback during preparation, then return one
 synchronous resolver per input. The callback returns a reader for the prepared
 binding facts; invoke that reader inside the resolver so committed binding
 changes invalidate ownership before an external effect. Do not retain the
 preparation callback after returning. The Gateway releases the facts after
 selection or delivery. Discord, Matrix, Slack, and Telegram use this contract for all bundled
-route ownership reads; deprecated synchronous hooks remain for external plugins
-until the next Plugin SDK major and warn when called.
+route ownership reads; the released synchronous resolver remains deprecated for
+external plugins while they migrate and warns when called.
 
 The original synchronous keyed stores, opaque `update`/`deleteIf` callbacks,
 binding managers, and adapter registrations remain compatibility APIs. They
@@ -329,6 +330,39 @@ callbacks are awaited by the host. The original APIs preserve their synchronous
 contracts through the next Plugin SDK major compatibility window. Use the narrow
 subpaths above for new imports; broad compatibility barrels retain existing APIs
 without duplicating the replacements.
+
+## Await session-backed approval routing
+
+Use the async approval-routing replacements when selecting an account, resolving
+a session target, or constructing native approval routes. They read delivery
+facts through the session worker instead of querying SQLite on the Gateway
+thread. Each synchronous API below is deprecated; append `Async` to its name
+to select the replacement:
+
+| SDK subpath                 | Deprecated APIs                                                                                                                                                                                                                                                                                                                                                       |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `approval-native-runtime`   | `createNativeApprovalChannelRouteGates`, `createChannelNativeOriginTargetResolver`, `resolveExecApprovalSessionTarget`, `resolveApprovalRequestSessionTarget`, `resolveApprovalRequestOriginTarget`, `resolveApprovalRequestAccountId`, `resolveApprovalRequestChannelAccountId`, `doesApprovalRequestMatchChannelAccount`, `doesApprovalRequestSelectChannelAccount` |
+| `approval-client-runtime`   | `createChannelExecApprovalProfile`                                                                                                                                                                                                                                                                                                                                    |
+| `approval-delivery-runtime` | `createApproverRestrictedNativeApprovalCapabilityFromForwardingRoutes`                                                                                                                                                                                                                                                                                                |
+
+The factories still return their adapters synchronously. Await the resulting
+session-dependent routing and eligibility methods. The direct account and target
+resolvers return promises. The existing `approval-runtime` facade also exposes
+the replacements for its retained APIs.
+
+For a routing operation that needs several decisions, call
+`resolveApprovalRequestSessionDeliveryAsync` once and pass its `sessionDelivery`
+result to the async helpers. `null` records that the session has no delivery
+facts. The `ApprovalRequestSessionDelivery` type describes this prepared value.
+Use `createChannelApproverDmTargetResolverAsync` and
+`createNativeApprovalForwardingFallbackSuppressorAsync` when their callbacks
+need asynchronous routing.
+
+Prepared delivery facts select a route; they do not authorize an approval.
+Keep the host's current-authority check at the actual approval effect. The
+deprecated synchronous APIs emit a migration warning and remain available during
+their deprecation period. They will be removed in a later release after stable
+deprecation. This changes no stored format, permissions, or update behavior.
 
 ## Await Gateway approval publication
 
@@ -577,6 +611,19 @@ The synchronous fingerprint, projection, binding, and injection methods are depr
 SDK major and explicit breaking-release approval. No runtime warning, schema
 change, retention change, or update migration is introduced.
 
+## Prepare harness tool surfaces
+
+Use `await createAgentHarnessToolSurfaceRuntimeAsync(params)` from
+`openclaw/plugin-sdk/agent-harness-tool-runtime` before compacting a harness tool
+catalog. The returned runtime keeps the same synchronous `compactTools` and
+`cleanup` methods. When local-model lean filtering is enabled, construction
+prepares its session policy through the session worker; compaction reuses those
+facts. Other surfaces do not load session metadata for lean filtering.
+
+The synchronous `createAgentHarnessToolSurfaceRuntime` remains supported during
+its deprecation period, warns once per plugin, and will be removed in a later
+release after stable deprecation. Bundled harnesses use the asynchronous factory.
+
 ## Prepare session catalog identities
 
 Await `readSessionTranscriptCatalogTitleAsync({ agentId, sessionKey, storePath, entry })`
@@ -614,7 +661,7 @@ invoke the supplied assertion after preparation and before the final sharing rea
 replacement at the same path, even when session IDs were reused.
 
 The released synchronous `createSessionCatalogSourceActorProjector` and
-`createSessionCatalogGitHubLinker` signatures remain available for existing plugins;
+`createSessionCatalogGitHubLinker` signatures are deprecated and remain available for existing plugins;
 bundled Session Share uses the awaited helpers. Schemas, stored data, retention,
 permissions, and update behavior are unchanged.
 

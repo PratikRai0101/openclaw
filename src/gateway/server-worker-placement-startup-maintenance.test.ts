@@ -201,8 +201,8 @@ async function preservedSessionKeys() {
 }
 
 describe("worker placement session maintenance ownership", () => {
-  it.each(["claim", "release"] as const)(
-    "rejects unpublished maintenance inventory during a concurrent worker %s",
+  it.each(["claim", "release", "dispatch"] as const)(
+    "preserves worker-owned session data during a concurrent %s",
     async (publication) => {
       await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
         const database = openOpenClawStateDatabase();
@@ -212,14 +212,17 @@ describe("worker placement session maintenance ownership", () => {
           sessionKey: "agent:main:concurrent-worker-session",
           agentId: "main",
         };
-        const active = await advancePlacementFixtureToActive(store, database, identity);
-        const turn = {
+        const active =
+          publication === "dispatch"
+            ? undefined
+            : await advancePlacementFixtureToActive(store, database, identity);
+        const turn = active && {
           ...identity,
           owner: placementTurnOwner(active),
           claimId: "concurrent-worker-claim",
           runId: "concurrent-worker-run",
         };
-        let claim = publication === "release" ? await store.claimTurn(turn) : undefined;
+        let claim = publication === "release" && turn ? await store.claimTurn(turn) : undefined;
         const storePath = resolveOpenClawAgentSqlitePath({ agentId: "main", env: state.env });
         const preservedEntry = { sessionId: identity.sessionId, updatedAt: 1 };
         await patchSessionEntryCore(
@@ -233,7 +236,7 @@ describe("worker placement session maintenance ownership", () => {
           storePath,
         });
         const { runtime } = createMaintenanceRuntime({
-          placements: [active],
+          placements: active ? [active] : [],
           preservationStore: store,
         });
         const sidecar = await startMaintenanceRuntime(runtime);
@@ -248,8 +251,10 @@ describe("worker placement session maintenance ownership", () => {
               if (claim) {
                 await store.releaseTurnIfOwned(claim);
                 claim = undefined;
-              } else {
+              } else if (turn) {
                 claim = await store.claimTurn(turn);
+              } else {
+                await store.startDispatch(identity);
               }
             }
             return result;
@@ -279,12 +284,14 @@ describe("worker placement session maintenance ownership", () => {
                 maxDiskBytes: false,
               }),
             }),
-          ).rejects.toThrow("Worker placement inventory changed");
+          ).resolves.toBeDefined();
           expect(preservationReads).toBe(1);
           expect(loadSessionEntryReadOnly({ ...identity, env: state.env, storePath })).toEqual(
             preservedSnapshot,
           );
-          expect(loadSessionEntryReadOnly(trigger)).toBeUndefined();
+          expect(loadSessionEntryReadOnly(trigger)?.sessionId).toBe(
+            "concurrent-maintenance-trigger",
+          );
         } finally {
           interleave.mockRestore();
           if (claim) {
@@ -297,7 +304,7 @@ describe("worker placement session maintenance ownership", () => {
   );
 
   it.each(["local claim", "local release", "worker dispatch"] as const)(
-    "fences a fresh lifecycle upsert only for worker placements during %s",
+    "admits a fresh lifecycle upsert during an unrelated %s",
     async (publication) => {
       await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
         const store = createWorkerSessionPlacementStore({ database: openOpenClawStateDatabase() });
@@ -356,10 +363,6 @@ describe("worker placement session maintenance ownership", () => {
             ],
           });
         try {
-          if (publication === "worker dispatch") {
-            await expect(mutate()).rejects.toThrow("Worker placement inventory changed");
-            expect(loadSessionEntryReadOnly(scope)).toBeUndefined();
-          }
           await expect(mutate()).resolves.toMatchObject({ afterCount: 1 });
           expect(loadSessionEntryReadOnly(scope)?.sessionId).toBe("fresh-local-session");
         } finally {
@@ -454,8 +457,18 @@ describe("worker placement session maintenance ownership", () => {
         }
         const originalManifest = placement.workspaceBaseManifestRef;
         placement.workspaceBaseManifestRef = `sha256:${"b".repeat(64)}`;
-        const currentManifestRefs = await additionalManifestRefs(currentPlacement);
+        using currentManifestRefs = await additionalManifestRefs(currentPlacement);
         expect(currentManifestRefs()).toEqual([originalManifest]);
+        await patchSessionEntryCore({ ...placement, storePath }, () => ({
+          repositoryWorkspaceId: "replacement-workspace",
+        }));
+        const sql = observeHostDataSql();
+        try {
+          expect(currentManifestRefs()).toEqual([originalManifest]);
+          expect(sql.queries).toEqual([]);
+        } finally {
+          sql.restore();
+        }
       } finally {
         prepared?.release();
         createRetention.mockRestore();

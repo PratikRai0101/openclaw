@@ -230,9 +230,14 @@ Opt into automatic resets globally, then override them per chat type or channel:
 
 ## Gateway restart recovery
 
-When a Gateway restart interrupts an active turn, OpenClaw tries to continue
-the existing session automatically. Three attempts that fail to start a backend
-turn exhaust the recovery budget. Once a real backend turn starts,
+When a Gateway restart interrupts an admitted turn, including one still waiting
+in the queue or preparing to execute, OpenClaw tries to continue the existing
+session automatically. Shutdown records recovery before canceling queued work.
+If restart cancellation finishes a collected run before that record commits,
+shutdown retains its recovery custody unless the session or run owner changes.
+Skipped sessions are logged with a reason, including when other sessions recover.
+Three attempts that fail to start a backend turn exhaust the recovery budget.
+Once a real backend turn starts,
 the budget refreshes, so a later Gateway restart does not consume the old allowance.
 Accepting, queueing, or preparing a resume request alone does not refresh it.
 CLI backends that do not report turn acceptance refresh the budget only after
@@ -252,6 +257,9 @@ the original caller's permission to run worktree setup scripts.
 
 When replaying an interrupted turn, recovery preserves its recorded tool calls
 and results, including nested tool activity, and reuses the original user message.
+A restart-aborted embedded response retains its already-streamed text as an
+interrupted assistant message when the transcript writer is still available.
+Unfinished tool calls in that response are discarded before persistence.
 A completed reply or a later user message closes that turn to replay.
 
 For authenticated operator turns, recovery revalidates the original caller's
@@ -267,6 +275,11 @@ This also covers parent turns started by subagent completion or pause notices.
 An interrupted parent continues independently of later child completions, and a
 retry of the same notice joins that recovery instead of starting the turn again.
 Parents still waiting after yielding to children remain owned by their child batch.
+
+If a delegated turn's sender authority cannot be reconstructed, automatic recovery
+stops with a recorded reason and a visible notice in the transcript or original
+channel. The notice explains how to continue in a replacement session. A saved
+delegation alone does not authorize replay after restart.
 
 Messages sent while restart recovery is waiting to start stay pending. Once
 recovery starts, they follow the session's normal message queue policy. You do
