@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import { GATEWAY_OWNER_PROFILE_ID } from "../../../packages/gateway-protocol/src/schema/user-profile-constants.js";
 import { withGatewayToolCallerIdentity } from "../../agents/tools/gateway-caller-context.js";
 import { resolveCommandAuthorization } from "../../auto-reply/command-auth.js";
 import { finalizeInboundContext } from "../../auto-reply/reply/inbound-context.js";
 import { buildInboundUserContextPrefix } from "../../auto-reply/reply/inbound-meta.js";
+import { resolveElevatedPermissions } from "../../auto-reply/reply/reply-elevated.js";
+import type { MsgContext } from "../../auto-reply/templating.js";
 import { createRemoteControlUiIngressTestContext } from "../remote-control-ui.test-support.js";
 import { prepareTurn } from "./chat-send-user-turn-family.test-support.js";
 import { createClientInfo } from "./chat-send-user-turn.test-support.js";
@@ -17,6 +20,23 @@ import type { GatewayClient } from "./types.js";
 
 function profile(profileId: string, displayName: string, updatedAt = 1) {
   return { profileId, displayName, hasAvatar: false, updatedAt };
+}
+
+function createClient(overrides: Partial<GatewayClient> = {}): GatewayClient {
+  return {
+    ...createSessionMutationTestClient(),
+    authenticatedUserId: "ada@example.test",
+    authenticatedUserProfile: profile("profile-ada", "Ada"),
+    ...overrides,
+  };
+}
+
+function authorize(context: MsgContext, entry = "profile-ada") {
+  return resolveCommandAuthorization({
+    ctx: { ...context },
+    cfg: { commands: { ownerAllowFrom: [entry], allowFrom: { "*": [entry] } } },
+    commandAuthorized: true,
+  });
 }
 
 describe("gateway client identity", () => {
@@ -88,25 +108,6 @@ describe("gateway client identity", () => {
 });
 
 describe("chat send command authority", () => {
-  function createClient(overrides: Partial<GatewayClient> = {}): GatewayClient {
-    return {
-      ...createSessionMutationTestClient(),
-      authenticatedUserId: "ada@example.test",
-      authenticatedUserProfile: profile("profile-ada", "Ada"),
-      ...overrides,
-    };
-  }
-  function authorize(
-    context: ReturnType<typeof resolveChatSendCallerContext>,
-    entry = "profile-ada",
-  ) {
-    return resolveCommandAuthorization({
-      ctx: { ...context },
-      cfg: { commands: { ownerAllowFrom: [entry], allowFrom: { "*": [entry] } } },
-      commandAuthorized: true,
-    });
-  }
-
   function expectAuthority(
     context: ReturnType<typeof resolveChatSendCallerContext>,
     allowed: boolean,
@@ -265,6 +266,162 @@ describe("chat send command authority", () => {
       const context = resolveChatSendCallerContext(client);
       expect(authorize(context).isAuthorizedSender).toBe(false);
       expect(authorize(context, "cli").isAuthorizedSender).toBe(false);
+    });
+  });
+});
+
+describe("chat send elevated authority", () => {
+  const exactProfile = ["profile-ada"];
+
+  function elevated(context: MsgContext, allowFrom: { global: string[]; agent?: string[] }) {
+    return resolveElevatedPermissions({
+      cfg: {
+        tools: { elevated: { enabled: true, allowFrom: { webchat: allowFrom.global } } },
+        agents: {
+          entries: {
+            main: {
+              tools: {
+                elevated: {
+                  enabled: true,
+                  allowFrom: { webchat: allowFrom.agent ?? exactProfile },
+                },
+              },
+            },
+          },
+        },
+      },
+      agentId: "main",
+      ctx: context,
+      provider: context.Provider ?? "",
+    });
+  }
+
+  // Exact-profile elevation is a proposed contract pending authorization-owner confirmation.
+  // Shared gateway-owner attribution must remain non-authorizing.
+  it("proposes verified Control UI profile matching through both elevated allowlists", () => {
+    const client = createClient();
+    const prepared = prepareTurn({
+      inputText: "/elevated on",
+      request: { inboundMessage: "/elevated on", clientInfo: client.connect.client },
+      attachments: { parsedMessage: "/elevated on" },
+      client,
+    });
+    const ctx = finalizeInboundContext(prepared.ctx);
+    expect(ctx.Provider).toBe("webchat");
+    expect(ctx).not.toHaveProperty("SenderId");
+    expect(authorize(ctx).isAuthorizedSender).toBe(true);
+    expect(elevated(ctx, { global: exactProfile, agent: exactProfile })).toEqual({
+      enabled: true,
+      allowed: true,
+      failures: [],
+    });
+  });
+
+  it("satisfies a global wildcard and an agent exact-profile entry independently", () => {
+    expect(elevated(resolveChatSendCallerContext(createClient()), { global: ["*"] })).toEqual({
+      enabled: true,
+      allowed: true,
+      failures: [],
+    });
+  });
+
+  it.each<[string, string[], string[], string]>([
+    [
+      "a global wildcard does not override the agent denial",
+      ["*"],
+      ["profile-other"],
+      "agents.entries.*.tools.elevated.allowFrom.webchat",
+    ],
+    [
+      "an agent match does not override the global denial",
+      ["profile-other"],
+      exactProfile,
+      "tools.elevated.allowFrom.webchat",
+    ],
+  ])("keeps both elevated allowlists independent when %s", (_name, global, agent, key) => {
+    expect(elevated(resolveChatSendCallerContext(createClient()), { global, agent })).toEqual({
+      enabled: true,
+      allowed: false,
+      failures: [{ gate: "allowFrom", key }],
+    });
+  });
+
+  it.each<[string, Partial<GatewayClient>]>([
+    [
+      "shared gateway-owner attribution",
+      {
+        authenticatedUserId: undefined,
+        authenticatedUserProfile: profile(GATEWAY_OWNER_PROFILE_ID, "Owner"),
+      },
+    ],
+    ["synthetic caller", { internal: { syntheticClient: true } }],
+  ])("keeps %s denied by exact-profile elevated allowlists", (_name, overrides) => {
+    const context = resolveChatSendCallerContext(createClient(overrides));
+    expect(context).not.toHaveProperty("SenderId");
+    const allowFrom = { global: [GATEWAY_OWNER_PROFILE_ID, "profile-ada"], agent: ["profile-ada"] };
+    expect(elevated(context, allowFrom)).toEqual({
+      enabled: true,
+      allowed: false,
+      failures: [{ gate: "allowFrom", key: "tools.elevated.allowFrom.webchat" }],
+    });
+  });
+
+  it.each(["invalidated", "disconnect", "rebound"] as const)(
+    "rechecks the live caller after %s before authorizing elevated",
+    (change) => {
+      const lifetime = new AbortController();
+      const client = createClient({ connectionSignal: lifetime.signal });
+      const context = resolveChatSendCallerContext(client);
+      expect(elevated(context, { global: exactProfile, agent: exactProfile })).toEqual({
+        enabled: true,
+        allowed: true,
+        failures: [],
+      });
+      if (change === "invalidated") {
+        client.invalidated = true;
+      } else if (change === "disconnect") {
+        lifetime.abort();
+      } else {
+        client.authenticatedUserProfile = profile("profile-other", "Other");
+      }
+      expect(elevated(context, { global: exactProfile, agent: exactProfile })).toEqual({
+        enabled: true,
+        allowed: false,
+        failures: [{ gate: "allowFrom", key: "tools.elevated.allowFrom.webchat" }],
+      });
+    },
+  );
+
+  it("rechecks a revoked remote Control UI grant before authorizing elevated", () => {
+    const lifetime = new AbortController();
+    let current = true;
+    const client = createClient({ authenticatedUserId: undefined });
+    const principal = createRemoteControlUiIngressTestContext({
+      audienceId: "elevated-authority",
+      principal: { kind: "person", profileId: "profile-ada" },
+      operatorScopeCeiling: ["operator.write"],
+      signal: lifetime.signal,
+      assertCurrent: () => {
+        if (!current) {
+          throw new Error("Grant revoked");
+        }
+      },
+    }).resolvePrincipal();
+    client.internal = {
+      operatorRoleActor: principal.operatorRoleActor,
+      remoteIngressPrincipal: principal,
+    };
+    const context = resolveChatSendCallerContext(client);
+    expect(elevated(context, { global: exactProfile, agent: exactProfile })).toEqual({
+      enabled: true,
+      allowed: true,
+      failures: [],
+    });
+    current = false;
+    expect(elevated(context, { global: exactProfile, agent: exactProfile })).toEqual({
+      enabled: true,
+      allowed: false,
+      failures: [{ gate: "allowFrom", key: "tools.elevated.allowFrom.webchat" }],
     });
   });
 });
