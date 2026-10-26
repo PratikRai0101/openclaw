@@ -53,6 +53,7 @@ export function loadLinkPreview(
   client: GatewayBrowserClient,
   url: string,
   signal?: AbortSignal,
+  options?: { allowUnavailable?: boolean },
 ): Promise<ControlUiLinkPreview> {
   let cache = previews.get(client);
   if (cache?.recoveryScope !== client.recoveryScope || client.offlineRecoveryRetired) {
@@ -100,7 +101,11 @@ export function loadLinkPreview(
     controller,
     subscribers: new Set(),
     promise: client
-      .request("controlUi.linkPreview", { url: key }, { signal: controller.signal })
+      .request(
+        "controlUi.linkPreview",
+        { url: key, ...(options?.allowUnavailable ? { allowUnavailable: true } : {}) },
+        { signal: controller.signal },
+      )
       .then(
         (value) => {
           if (

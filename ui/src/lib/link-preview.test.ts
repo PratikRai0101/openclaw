@@ -33,6 +33,21 @@ describe("shared public link metadata", () => {
     expect(request.mock.calls[0]?.[1]).toEqual({ url: "https://example.com/page" });
   });
 
+  it("requests unavailable browser-tab previews explicitly", async () => {
+    const { client, request } = fixture();
+    request.mockResolvedValue({});
+
+    await loadLinkPreview(client, "http://127.0.0.1/private", undefined, {
+      allowUnavailable: true,
+    });
+
+    expect(request).toHaveBeenCalledExactlyOnceWith(
+      "controlUi.linkPreview",
+      { url: "http://127.0.0.1/private", allowUnavailable: true },
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
   it.each([
     ["connectionGeneration", 2],
     ["recoveryScope", "new"],

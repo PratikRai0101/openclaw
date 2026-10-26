@@ -396,7 +396,12 @@ export const controlUiHandlers: GatewayRequestHandlers = {
     }
     const { classifyControlUiLinkPreviewTarget, loadControlUiLinkPreview } =
       await import("../control-ui-link-preview.js");
-    const target = Object.keys(params).every((key) => key === "url")
+    const allowUnavailable = params.allowUnavailable === true;
+    const target = Object.keys(params).every(
+      (key) =>
+        key === "url" ||
+        (key === "allowUnavailable" && typeof params.allowUnavailable === "boolean"),
+    )
       ? classifyControlUiLinkPreviewTarget(params.url)
       : ({ kind: "invalid" } as const);
     if (target.kind === "invalid") {
@@ -404,7 +409,11 @@ export const controlUiHandlers: GatewayRequestHandlers = {
       return;
     }
     if (target.kind === "unavailable") {
-      respond(true, {}, undefined);
+      if (allowUnavailable) {
+        respond(true, {}, undefined);
+      } else {
+        respondError(respond, ErrorCodes.INVALID_REQUEST, "invalid controlUi.linkPreview params");
+      }
       return;
     }
     const preview = await loadControlUiLinkPreview(target.url, isEnabled, scope);
