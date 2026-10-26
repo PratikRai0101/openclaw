@@ -862,10 +862,11 @@ describe("controlUi.linkPreview", () => {
   });
 
   it.each([
-    { url: "http://127.0.0.1/private" },
+    { url: "not a url" },
+    { url: "file:///etc/passwd" },
     { url: "https://public.example", token: "not-forwarded" },
     {},
-  ])("rejects malformed or private targets %j", async (params) => {
+  ])("rejects malformed targets %j", async (params) => {
     const fetch = vi.fn<typeof globalThis.fetch>();
     vi.stubGlobal("fetch", fetch);
     const { respond, send } = fixture("linkPreview");
@@ -873,6 +874,22 @@ describe("controlUi.linkPreview", () => {
     expectError(respond, expect.objectContaining({ code: "INVALID_REQUEST" }));
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { url: "http://127.0.0.1/private" },
+    { url: "http://192.168.1.10/" },
+    { url: "https://user:secret@public.example/" },
+  ])(
+    "returns an empty preview for valid targets excluded from public previews %j",
+    async (params) => {
+      const fetch = vi.fn<typeof globalThis.fetch>();
+      vi.stubGlobal("fetch", fetch);
+      const { respond, send } = fixture("linkPreview");
+      await send(params);
+      expectReply(respond, {});
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(["authority", "config", "principal"] as const)(
     "rechecks %s during fetch",

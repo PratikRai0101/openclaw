@@ -30,24 +30,41 @@ const principals = new WeakMap<object, number>();
 let nextPrincipal = 0;
 const cache = new Map<string, CacheEntry>();
 
-/** Public presentation only: never reuse browser credentials or private-network policy. */
-export function parseControlUiLinkPreviewUrl(value: unknown, base?: string): URL | null {
+export type ControlUiLinkPreviewTarget =
+  | { kind: "invalid" }
+  | { kind: "unavailable" }
+  | { kind: "previewable"; url: URL };
+
+/**
+ * Separates malformed input from a valid public web URL that is intentionally not previewable.
+ * Public presentation only: never reuse browser credentials or private-network policy.
+ */
+export function classifyControlUiLinkPreviewTarget(
+  value: unknown,
+  base?: string,
+): ControlUiLinkPreviewTarget {
   if (typeof value !== "string" || !value.trim() || value.length > 2_048) {
-    return null;
+    return { kind: "invalid" };
   }
   const url = URL.parse(value, base);
+  if (!url || !["http:", "https:"].includes(url.protocol)) {
+    return { kind: "invalid" };
+  }
   if (
-    !url ||
-    !["http:", "https:"].includes(url.protocol) ||
     url.username ||
     url.password ||
     isIP(normalizeHostname(url.hostname)) ||
     isBlockedHostnameOrIp(url.hostname)
   ) {
-    return null;
+    return { kind: "unavailable" };
   }
   url.hash = "";
-  return url;
+  return { kind: "previewable", url };
+}
+
+export function parseControlUiLinkPreviewUrl(value: unknown, base?: string): URL | null {
+  const target = classifyControlUiLinkPreviewTarget(value, base);
+  return target.kind === "previewable" ? target.url : null;
 }
 
 async function readPageMetadata(response: Response, finalUrl: string, signal: AbortSignal) {

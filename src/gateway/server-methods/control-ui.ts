@@ -394,16 +394,20 @@ export const controlUiHandlers: GatewayRequestHandlers = {
       respond(true, {}, undefined);
       return;
     }
-    const { parseControlUiLinkPreviewUrl, loadControlUiLinkPreview } =
+    const { classifyControlUiLinkPreviewTarget, loadControlUiLinkPreview } =
       await import("../control-ui-link-preview.js");
-    const url = Object.keys(params).every((key) => key === "url")
-      ? parseControlUiLinkPreviewUrl(params.url)
-      : null;
-    if (!url) {
+    const target = Object.keys(params).every((key) => key === "url")
+      ? classifyControlUiLinkPreviewTarget(params.url)
+      : ({ kind: "invalid" } as const);
+    if (target.kind === "invalid") {
       respondError(respond, ErrorCodes.INVALID_REQUEST, "invalid controlUi.linkPreview params");
       return;
     }
-    const preview = await loadControlUiLinkPreview(url, isEnabled, scope);
+    if (target.kind === "unavailable") {
+      respond(true, {}, undefined);
+      return;
+    }
+    const preview = await loadControlUiLinkPreview(target.url, isEnabled, scope);
     respond(true, !signal?.aborted && isEnabled() ? preview : {}, undefined);
   },
   "controlUi.githubPreview": createGitHubReadHandler(
