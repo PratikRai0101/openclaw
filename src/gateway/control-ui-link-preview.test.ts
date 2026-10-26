@@ -6,8 +6,12 @@ vi.mock("../media/image-ops.js", async (original) => ({
   ...(await original<typeof import("../media/image-ops.js")>()),
   createImageProcessor: () => ({ encode }),
 }));
-const { loadControlUiLinkPreview, parseControlUiLinkPreviewUrl } =
-  await import("./control-ui-link-preview.js");
+const {
+  isControlUiLinkPreviewEligible,
+  loadControlUiLinkPreview,
+  parseControlUiLinkPreviewInput,
+  parseControlUiLinkPreviewUrl,
+} = await import("./control-ui-link-preview.js");
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zb0YAAAAASUVORK5CYII=",
   "base64",
@@ -51,6 +55,15 @@ describe("public link previews", () => {
   ])("rejects unsafe target %s", (value) => {
     expect(parseControlUiLinkPreviewUrl(value)).toBeNull();
   });
+
+  it.each(["http://[::1]", "https://metadata.google.internal/", "https://8.8.8.8/"])(
+    "separates ineligible target %s from malformed input",
+    (value) => {
+      const url = parseControlUiLinkPreviewInput(value);
+      expect(url).not.toBeNull();
+      expect(isControlUiLinkPreviewEligible(url!)).toBe(false);
+    },
+  );
 
   it("uses redirected-page OG metadata, document base URLs, entity decoding and anonymous requests", async () => {
     encode.mockResolvedValue({ data: PNG });
