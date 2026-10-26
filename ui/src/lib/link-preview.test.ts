@@ -64,19 +64,44 @@ it("bounds untrusted presentation and never returns remote images", async () => 
     faviconDataUrl: undefined,
   });
 });
-it("requests unavailable browser-tab previews explicitly", async () => {
+it.each([
+  ["default first", ["default", "opted"]],
+  ["opted first", ["opted", "default"]],
+] as const)("keeps preview requests separate when %s", async (_label, order) => {
   const { client, request } = fixture();
-  request.mockResolvedValue({});
-
-  await loadLinkPreview(client, "http://127.0.0.1/private", undefined, {
-    allowUnavailable: true,
-  });
-
-  expect(request).toHaveBeenCalledExactlyOnceWith(
-    "controlUi.linkPreview",
-    { url: "http://127.0.0.1/private", allowUnavailable: true },
-    { signal: expect.any(AbortSignal) },
+  const url = "http://127.0.0.1:8080/";
+  const pending = {
+    default: createDeferred<unknown>(),
+    opted: createDeferred<unknown>(),
+  };
+  request.mockImplementation((_method: string, params: { allowUnavailable?: boolean }) =>
+    params?.allowUnavailable ? pending.opted.promise : pending.default.promise,
   );
+
+  const results = order.map((mode) =>
+    loadLinkPreview(
+      client,
+      url,
+      undefined,
+      mode === "opted" ? { allowUnavailable: true } : undefined,
+    ),
+  );
+
+  expect(request).toHaveBeenCalledTimes(2);
+  expect(request.mock.calls.map((call) => call[1])).toEqual(
+    order.map((mode) => (mode === "opted" ? { url, allowUnavailable: true } : { url })),
+  );
+
+  pending.default.reject(new Error("invalid params"));
+  pending.opted.resolve({});
+  await expect(results[0]).resolves.toEqual({});
+  await expect(results[1]).resolves.toEqual({});
+
+  // The opted-in empty result is cached; the default rejection is not.
+  await expect(
+    loadLinkPreview(client, url, undefined, { allowUnavailable: true }),
+  ).resolves.toEqual({});
+  expect(request).toHaveBeenCalledTimes(2);
 });
 it("keeps settled metadata through disconnect and reconnect but retires a changed identity", async () => {
   const { load, request, state } = fixture();
