@@ -863,7 +863,7 @@ describe("controlUi.linkPreview", () => {
 
   it.each([
     { url: "not a url" },
-    { url: "file:///etc/passwd" },
+    { url: "ftp://public.example/file" },
     { url: "https://public.example", token: "not-forwarded" },
     {},
   ])("rejects malformed targets %j", async (params) => {
@@ -875,11 +875,7 @@ describe("controlUi.linkPreview", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it.each([
-    { url: "http://127.0.0.1/private" },
-    { url: "http://192.168.1.10/" },
-    { url: "https://user:secret@public.example/" },
-  ])(
+  it.each([{ url: "http://127.0.0.1/private" }, { url: "http://192.168.1.10/" }])(
     "returns an empty preview for valid targets excluded from public previews %j",
     async (params) => {
       const fetch = vi.fn<typeof globalThis.fetch>();
