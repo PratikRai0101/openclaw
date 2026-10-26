@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { expect, it } from "vitest";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
@@ -84,6 +84,43 @@ suite.define(() => {
           match: { url: "https://example.com/page" },
         });
         expect(request.params).toMatchObject({ url: "https://example.com/page" });
+      },
+    );
+  });
+
+  it("keeps a local browser card unavailable without treating it as an error", async () => {
+    const url = "http://127.0.0.1:8080/";
+    await suite.withPage(
+      { viewport: { width: 390, height: 844 }, colorScheme: "light", serviceWorkers: "block" },
+      async ({ page }) => {
+        const gateway = await installMockGateway(page, {
+          automaticallyFetchFavicons: true,
+          featureMethods: [],
+          methodResponses: {
+            "controlUi.linkPreview": {
+              cases: [{ match: { url, allowUnavailable: true }, response: {} }],
+            },
+          },
+          historyMessages: [
+            { role: "user", content: "Preview a local page.", timestamp: 1000 },
+            ...browserHistory([url]),
+            { role: "assistant", content: "Local page ready.", timestamp: 5000 },
+          ],
+        });
+        await page.goto(`${suite.server.baseUrl}chat`);
+        await page.getByText("Local page ready.", { exact: true }).waitFor();
+        const card = page.locator("openclaw-browser-tab-card").filter({ hasText: url });
+        await expect.poll(() => card.count()).toBe(1);
+        await expect.poll(() => card.locator(".url").textContent()).toBe(url);
+        const request = await gateway.waitForRequest("controlUi.linkPreview", {
+          match: { url, allowUnavailable: true },
+        });
+        expect(request.params).toMatchObject({ url, allowUnavailable: true });
+        writeFileSync(
+          `${suite.artifactDir}/link-preview-request.json`,
+          JSON.stringify({ request: request.params, response: {} }, null, 2),
+        );
+        await page.screenshot({ path: `${suite.artifactDir}/local-browser-card.png` });
       },
     );
   });
