@@ -861,16 +861,30 @@ describe("controlUi.linkPreview", () => {
     vi.unstubAllGlobals();
   });
 
+  it.each([{ url: "https://public.example", token: "not-forwarded" }, {}])(
+    "rejects malformed targets %j",
+    async (params) => {
+      const fetch = vi.fn<typeof globalThis.fetch>();
+      vi.stubGlobal("fetch", fetch);
+      const { respond, send } = fixture("linkPreview");
+      await send(params);
+      expectError(respond, expect.objectContaining({ code: "INVALID_REQUEST" }));
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
-    { url: "http://127.0.0.1/private" },
-    { url: "https://public.example", token: "not-forwarded" },
-    {},
-  ])("rejects malformed or private targets %j", async (params) => {
+    "http://127.0.0.1:8080/",
+    "http://192.168.1.10/",
+    "http://[::1]/",
+    "https://metadata.google.internal/",
+    "https://8.8.8.8/",
+  ])("returns no preview for ineligible target %s", async (url) => {
     const fetch = vi.fn<typeof globalThis.fetch>();
     vi.stubGlobal("fetch", fetch);
     const { respond, send } = fixture("linkPreview");
-    await send(params);
-    expectError(respond, expect.objectContaining({ code: "INVALID_REQUEST" }));
+    await send({ url });
+    expect(respond).toHaveBeenCalledWith(true, {}, undefined);
     expect(fetch).not.toHaveBeenCalled();
   });
 
