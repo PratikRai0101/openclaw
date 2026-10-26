@@ -50,12 +50,10 @@ export function classifyControlUiLinkPreviewTarget(
   if (!url || !["http:", "https:"].includes(url.protocol)) {
     return { kind: "invalid" };
   }
-  if (
-    url.username ||
-    url.password ||
-    isIP(normalizeHostname(url.hostname)) ||
-    isBlockedHostnameOrIp(url.hostname)
-  ) {
+  if (url.username || url.password) {
+    return { kind: "invalid" };
+  }
+  if (isIP(normalizeHostname(url.hostname)) || isBlockedHostnameOrIp(url.hostname)) {
     return { kind: "unavailable" };
   }
   url.hash = "";
