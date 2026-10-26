@@ -106,11 +106,15 @@ it("does not restore deleted diary content from an update already in progress", 
 
 it("preserves the workspace directory mode when publishing DREAMS.md", async () => {
   const mode = 0o770;
-  await fs.chmod(workspaceDir, mode);
+  if (process.platform !== "win32") {
+    await fs.chmod(workspaceDir, mode);
+  }
 
   await writeBackfill();
 
-  expect((await fs.stat(workspaceDir)).mode & 0o7777).toBe(mode);
+  if (process.platform !== "win32") {
+    expect((await fs.stat(workspaceDir)).mode & 0o7777).toBe(mode);
+  }
   await expect(readDiary()).resolves.toContain("The archive remembered a durable fact.");
 });
 
