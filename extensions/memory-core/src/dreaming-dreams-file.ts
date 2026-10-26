@@ -97,9 +97,11 @@ export async function writeDreamsFileAtomic(
   }
   await fs.mkdir(path.dirname(dreamsPath), { recursive: true });
   await assertSafeDreamsPath(dreamsPath);
+  const dirMode = (await fs.stat(path.dirname(dreamsPath))).mode & 0o7777;
   await replaceFileAtomic({
     filePath: dreamsPath,
     content,
+    dirMode,
     mode: 0o600,
     preserveExistingMode: true,
     tempPrefix: `${path.basename(dreamsPath)}.dreams`,

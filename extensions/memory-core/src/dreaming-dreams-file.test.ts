@@ -104,6 +104,16 @@ it("does not restore deleted diary content from an update already in progress", 
   }
 });
 
+it("preserves the workspace directory mode when publishing DREAMS.md", async () => {
+  const mode = 0o770;
+  await fs.chmod(workspaceDir, mode);
+
+  await writeBackfill();
+
+  expect((await fs.stat(workspaceDir)).mode & 0o7777).toBe(mode);
+  await expect(readDiary()).resolves.toContain("The archive remembered a durable fact.");
+});
+
 it("reads and removes backfill entries", async () => {
   const written = await writeBackfill(undefined, {
     sourcePath: "memory/2026-04-05.md",
