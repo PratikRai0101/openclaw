@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
+import { evaluateControlUiContext } from "../test-helpers/control-ui-e2e-context.ts";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 
@@ -84,6 +85,53 @@ suite.define(() => {
           match: { url: "https://example.com/page" },
         });
         expect(request.params).toMatchObject({ url: "https://example.com/page" });
+      },
+    );
+  });
+
+  it("never asks for a preview of a local tab while a public tab still previews", async () => {
+    const local = "http://127.0.0.1:8080/";
+    await suite.withPage(
+      { viewport: { width: 1440, height: 900 }, colorScheme: "light", serviceWorkers: "block" },
+      async ({ page }) => {
+        const gateway = await installMockGateway(page, {
+          automaticallyFetchFavicons: true,
+          featureMethods: [],
+          methodResponses: {
+            "controlUi.linkPreview": {
+              cases: [
+                {
+                  match: { url: "https://example.com/page" },
+                  response: { title: "Example page" },
+                },
+              ],
+            },
+          },
+          historyMessages: [
+            { role: "user", content: "Open both pages.", timestamp: 1000 },
+            ...browserHistory([local, "https://example.com/page"]),
+            { role: "assistant", content: "Both pages are ready.", timestamp: 5000 },
+          ],
+        });
+        await page.goto(`${suite.server.baseUrl}chat`);
+        await page.getByText("Both pages are ready.", { exact: true }).waitFor();
+        const cards = page.locator("openclaw-browser-tab-card");
+        await expect.poll(() => cards.count()).toBe(2);
+        const localCard = cards.filter({ hasText: "127.0.0.1" });
+        await expect.poll(() => localCard.locator(".url").textContent()).toBe(local);
+        expect(await cards.filter({ hasText: "Example page" }).count()).toBe(1);
+
+        await evaluateControlUiContext(page, (app) => app.navigate("about"));
+        await page.waitForURL((url) => url.pathname.endsWith("/about"));
+        await evaluateControlUiContext(page, (app) => app.navigate("chat"));
+        await expect.poll(() => cards.count()).toBe(2);
+        await expect.poll(() => localCard.locator(".url").textContent()).toBe(local);
+
+        expect(await gateway.getRequests("controlUi.linkPreview", { url: local })).toEqual([]);
+        expect(
+          await gateway.getRequests("controlUi.linkPreview", { url: "https://example.com/page" }),
+        ).toHaveLength(1);
+        expect(await cards.filter({ hasText: "Example page" }).count()).toBe(1);
       },
     );
   });

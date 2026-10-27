@@ -1,3 +1,4 @@
+import { parseLooseIpAddress } from "@openclaw/net-policy/ip";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import type { ControlUiLinkPreview } from "../../../src/gateway/control-ui-contract.js";
@@ -19,6 +20,22 @@ type PreviewCache = {
 // Browser cards and hovercards share one bounded projection of the Gateway's
 // anonymous metadata cache. Settled metadata survives a reconnect, never an identity change.
 const previews = new WeakMap<GatewayBrowserClient, PreviewCache>();
+// Gateway previews are public pages only; asking for a private or internal target just errors.
+const NON_PUBLIC_HOSTS = new Set([
+  "localhost",
+  "localhost.localdomain",
+  "metadata.google.internal",
+]);
+const NON_PUBLIC_HOST_SUFFIXES = [".localhost", ".local", ".internal"];
+
+function isPublicPreviewTarget(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.+$/u, "");
+  return (
+    !parseLooseIpAddress(host) &&
+    !NON_PUBLIC_HOSTS.has(host) &&
+    !NON_PUBLIC_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix))
+  );
+}
 
 export function clearLinkPreviews(client: GatewayBrowserClient): void {
   for (const entry of previews.get(client)?.entries.values() ?? []) {
@@ -71,7 +88,8 @@ export function loadLinkPreview(
     !parsed ||
     !["http:", "https:"].includes(parsed.protocol) ||
     parsed.username ||
-    parsed.password
+    parsed.password ||
+    !isPublicPreviewTarget(parsed.hostname)
   ) {
     return Promise.resolve({});
   }

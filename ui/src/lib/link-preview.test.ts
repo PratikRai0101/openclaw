@@ -78,6 +78,25 @@ it("keeps settled metadata through disconnect and reconnect but retires a change
   expect(await load()).toMatchObject({ title: "New account" });
   expect(request).toHaveBeenCalledTimes(3);
 });
+it.each([
+  "http://127.0.0.1:8080/",
+  "http://127.1/",
+  "http://192.168.1.10/",
+  "http://10.0.0.5/",
+  "http://[::1]/",
+  "https://8.8.8.8/",
+  "http://localhost:3000/",
+  "https://metadata.google.internal/",
+  "http://macbook.local/",
+  "http://localhost.localdomain/",
+])("does not ask the Gateway to preview %s", async (url) => {
+  const { client, request } = fixture();
+  expect(await loadLinkPreview(client, url)).toEqual({});
+  expect(request).not.toHaveBeenCalled();
+  expect(await loadLinkPreview(client, url)).toEqual({});
+  expect(request).not.toHaveBeenCalled();
+});
+
 it("backs off empty metadata but retries transport failures", async () => {
   vi.useFakeTimers();
   const { load, request } = fixture();
