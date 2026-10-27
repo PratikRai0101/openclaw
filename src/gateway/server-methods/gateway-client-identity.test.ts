@@ -296,9 +296,9 @@ describe("chat send elevated authority", () => {
     });
   }
 
-  // Exact-profile elevation is a proposed contract pending authorization-owner confirmation.
-  // Shared gateway-owner attribution must remain non-authorizing.
-  it("proposes verified Control UI profile matching through both elevated allowlists", () => {
+  // Exact-profile elevation consumes the verified login identity that command allowlists
+  // already accept. Shared gateway-owner attribution remains non-authorizing.
+  it("matches a verified Control UI profile through both elevated allowlists", () => {
     const client = createClient();
     const prepared = prepareTurn({
       inputText: "/elevated on",
@@ -319,6 +319,43 @@ describe("chat send elevated authority", () => {
 
   it("satisfies a global wildcard and an agent exact-profile entry independently", () => {
     expect(elevated(resolveChatSendCallerContext(createClient()), { global: ["*"] })).toEqual({
+      enabled: true,
+      allowed: true,
+      failures: [],
+    });
+  });
+
+  it.each<[string, string[], boolean]>([
+    ["a plain profile entry", ["profile-ada"], true],
+    ["an explicit id entry", ["id:profile-ada"], true],
+    ["a mutable username entry", ["username:profile-ada"], false],
+    ["a mutable name entry", ["name:profile-ada"], false],
+  ])("matches %s against the live verified profile only as identity", (_name, entries, allowed) => {
+    expect(
+      elevated(resolveChatSendCallerContext(createClient()), { global: entries, agent: entries }),
+    ).toEqual({
+      enabled: true,
+      allowed,
+      failures: allowed ? [] : [{ gate: "allowFrom", key: "tools.elevated.allowFrom.webchat" }],
+    });
+  });
+
+  it("keeps non-UI application-ID matches while also matching the verified profile", () => {
+    const base = createClient();
+    const client = createClient({
+      connect: {
+        ...base.connect,
+        client: { ...base.connect.client, id: "cli", mode: "cli" },
+      },
+    });
+    const context = resolveChatSendCallerContext(client);
+    expect(context.SenderId).toBe("cli");
+    expect(elevated(context, { global: ["cli"], agent: ["cli"] })).toEqual({
+      enabled: true,
+      allowed: true,
+      failures: [],
+    });
+    expect(elevated(context, { global: exactProfile, agent: exactProfile })).toEqual({
       enabled: true,
       allowed: true,
       failures: [],
@@ -346,7 +383,7 @@ describe("chat send elevated authority", () => {
     });
   });
 
-  it.each<[string, Partial<GatewayClient>]>([
+  const nonHumanCallers: Array<[string, Partial<GatewayClient>]> = [
     [
       "shared gateway-owner attribution",
       {
@@ -355,15 +392,32 @@ describe("chat send elevated authority", () => {
       },
     ],
     ["synthetic caller", { internal: { syntheticClient: true } }],
-  ])("keeps %s denied by exact-profile elevated allowlists", (_name, overrides) => {
-    const context = resolveChatSendCallerContext(createClient(overrides));
-    expect(context).not.toHaveProperty("SenderId");
-    const allowFrom = { global: [GATEWAY_OWNER_PROFILE_ID, "profile-ada"], agent: ["profile-ada"] };
-    expect(elevated(context, allowFrom)).toEqual({
-      enabled: true,
-      allowed: false,
-      failures: [{ gate: "allowFrom", key: "tools.elevated.allowFrom.webchat" }],
-    });
+  ];
+
+  it.each(nonHumanCallers)(
+    "keeps %s denied by exact-profile elevated allowlists",
+    (_name, overrides) => {
+      const context = resolveChatSendCallerContext(createClient(overrides));
+      expect(context).not.toHaveProperty("SenderId");
+      const allowFrom = {
+        global: [GATEWAY_OWNER_PROFILE_ID, "profile-ada"],
+        agent: ["profile-ada"],
+      };
+      expect(elevated(context, allowFrom)).toEqual({
+        enabled: true,
+        allowed: false,
+        failures: [{ gate: "allowFrom", key: "tools.elevated.allowFrom.webchat" }],
+      });
+    },
+  );
+
+  it.each(nonHumanCallers)("keeps the blanket wildcard allow for %s", (_name, overrides) => {
+    expect(
+      elevated(resolveChatSendCallerContext(createClient(overrides)), {
+        global: ["*"],
+        agent: ["*"],
+      }),
+    ).toEqual({ enabled: true, allowed: true, failures: [] });
   });
 
   it.each(["invalidated", "disconnect", "rebound"] as const)(

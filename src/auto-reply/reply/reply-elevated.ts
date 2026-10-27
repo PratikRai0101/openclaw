@@ -3,6 +3,7 @@ import { normalizeStringEntries } from "@openclaw/normalization-core/string-norm
 import { resolveAgentConfig } from "../../agents/agent-scope.js";
 import { getChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
 import type { AgentElevatedAllowFromConfig, OpenClawConfig } from "../../config/config.js";
+import { getCommandSenderAuthority } from "../command-sender-authority.js";
 import { shouldUseFromAsSenderFallback } from "../sender-identity.js";
 import type { MsgContext } from "../templating.js";
 import {
@@ -78,6 +79,13 @@ function isApprovedElevatedSender(params: {
     username: buildMutableTokens(params.ctx.SenderUsername),
     tag: buildMutableTokens(params.ctx.SenderTag),
   };
+  // Live verified caller authority is the profile identity command allowlists already accept.
+  const liveSenderId = getCommandSenderAuthority(params.ctx)?.();
+  if (liveSenderId) {
+    for (const token of identityTokens(liveSenderId, true)) {
+      fieldTokens.id.add(token);
+    }
+  }
   const senderIdentityTokens = new Set([
     ...fieldTokens.id,
     ...fieldTokens.from,
