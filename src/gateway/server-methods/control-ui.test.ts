@@ -856,21 +856,21 @@ describe("controlUi.sessionPullRequests.checks", () => {
 });
 
 describe("controlUi.linkPreview", () => {
+  const invalid = expect.objectContaining({ code: "INVALID_REQUEST" });
   afterEach(() => {
     clearRuntimeConfigSnapshot();
     vi.unstubAllGlobals();
   });
 
   it.each([
-    { url: "http://127.0.0.1/private" },
-    { url: "https://public.example", token: "not-forwarded" },
-    {},
-  ])("rejects malformed or private targets %j", async (params) => {
+    [{ url: "http://127.0.0.1/private" }, [true, {}, undefined]],
+    [{ url: "https://public.example", token: "not-forwarded" }, [false, undefined, invalid]],
+  ])("answers ineligible targets; rejects bad params %j", async (params, expected) => {
     const fetch = vi.fn<typeof globalThis.fetch>();
     vi.stubGlobal("fetch", fetch);
     const { respond, send } = fixture("linkPreview");
     await send(params);
-    expectError(respond, expect.objectContaining({ code: "INVALID_REQUEST" }));
+    expect(respond).toHaveBeenCalledWith(...expected);
     expect(fetch).not.toHaveBeenCalled();
   });
 
