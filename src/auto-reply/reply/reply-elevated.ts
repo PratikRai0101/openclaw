@@ -3,6 +3,7 @@ import { normalizeStringEntries } from "@openclaw/normalization-core/string-norm
 import { resolveAgentConfig } from "../../agents/agent-scope.js";
 import { getChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
 import type { AgentElevatedAllowFromConfig, OpenClawConfig } from "../../config/config.js";
+import { getCommandSenderAuthority } from "../command-sender-authority.js";
 import { shouldUseFromAsSenderFallback } from "../sender-identity.js";
 import type { MsgContext } from "../templating.js";
 import {
@@ -53,6 +54,13 @@ function isApprovedElevatedSender(params: {
     return false;
   }
   if (allowTokens.some((entry) => entry === "*")) {
+    return true;
+  }
+
+  // Control UI profiles are private live authority, not public sender attribution.
+  const profileId =
+    params.provider === "webchat" ? getCommandSenderAuthority(params.ctx)?.() : undefined;
+  if (profileId && allowTokens.includes(profileId)) {
     return true;
   }
 

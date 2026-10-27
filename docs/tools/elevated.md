@@ -89,6 +89,8 @@ Send `/elevated` with no argument to see the current level.
 - **Channel-provided fallback allowlist**: channel plugins can optionally supply a fallback allowlist through an SDK adapter hook, used when `tools.elevated.allowFrom.<provider>` is not configured. No bundled channel currently implements this hook, so in practice every provider needs an explicit `tools.elevated.allowFrom.<provider>` entry today.
 - **All gates must pass**; otherwise elevated is treated as unavailable
 
+For WebChat, an unprefixed entry in `allowFrom.webchat` also matches the caller's live verified profile ID. Both the global and per-agent allowlists still apply. Shared `gateway-owner` attribution, client labels, and synthetic callers do not establish verified profile authority.
+
 Allowlist entry formats:
 
 | Prefix                  | Matches                         |
