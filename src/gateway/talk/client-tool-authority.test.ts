@@ -6,21 +6,15 @@ import { resolveTalkAgentConsultAuthority } from "./client-gateway-control.js";
 import { prepareTalkClientToolContext } from "./client-tool-authority.js";
 
 const verifiedProfile = "profile-ada";
-
-function elevatedConfig(): OpenClawConfig {
-  const allowFrom = { webchat: [verifiedProfile] };
-  return {
-    tools: { elevated: { enabled: true, allowFrom } },
-    agents: { entries: { main: { tools: { elevated: { enabled: true, allowFrom } } } } },
-  };
-}
+const allowFrom = { webchat: [verifiedProfile, GATEWAY_OWNER_PROFILE_ID] };
+const config: OpenClawConfig = {
+  tools: { elevated: { enabled: true, allowFrom } },
+  agents: { entries: { main: { tools: { elevated: { enabled: true, allowFrom } } } } },
+};
+const scopes = ["operator.read", "operator.write"];
 
 function prepareBashElevatedFor(authority: ReturnType<typeof resolveTalkAgentConsultAuthority>) {
-  return prepareTalkClientToolContext({
-    config: elevatedConfig(),
-    agentId: "main",
-    authority,
-  })?.bashElevated;
+  return prepareTalkClientToolContext({ config, agentId: "main", authority })?.bashElevated;
 }
 
 function prepareBashElevated(client: ReturnType<typeof sharingPolicyClient>) {
@@ -28,27 +22,12 @@ function prepareBashElevated(client: ReturnType<typeof sharingPolicyClient>) {
 }
 
 describe("Talk client tool authority", () => {
-  it("uses the live verified profile for elevated bash", () => {
-    const client = sharingPolicyClient({
-      user: verifiedProfile,
-      scopes: ["operator.read", "operator.write"],
-    });
-
-    expect(prepareBashElevated(client)).toMatchObject({
-      enabled: true,
-      allowed: true,
-      defaultLevel: "on",
-    });
-  });
-
   it.each([
+    ["a verified profile", () => sharingPolicyClient({ user: verifiedProfile, scopes }), true],
     [
       "shared gateway-owner attribution",
       () => {
-        const client = sharingPolicyClient({
-          deviceId: "talk-shared-owner",
-          scopes: ["operator.read", "operator.write"],
-        });
+        const client = sharingPolicyClient({ deviceId: "talk-shared-owner", scopes });
         client.authenticatedUserProfile = {
           profileId: GATEWAY_OWNER_PROFILE_ID,
           displayName: "Owner",
@@ -57,28 +36,28 @@ describe("Talk client tool authority", () => {
         };
         return client;
       },
+      false,
     ],
     [
       "a synthetic caller",
       () => {
-        const client = sharingPolicyClient({
-          user: verifiedProfile,
-          scopes: ["operator.read", "operator.write"],
-        });
+        const client = sharingPolicyClient({ user: verifiedProfile, scopes });
         client.internal = { syntheticClient: true };
         return client;
       },
+      false,
     ],
-  ] as const)("keeps %s denied by exact-profile elevated bash", (_name, create) => {
-    expect(prepareBashElevated(create())).toMatchObject({ enabled: true, allowed: false });
+  ] as const)("uses the live matcher for %s", (_name, create, allowed) => {
+    expect(prepareBashElevated(create())).toMatchObject({
+      enabled: true,
+      allowed,
+      defaultLevel: allowed ? "on" : "off",
+    });
   });
 
   it("rechecks the live reply caller before elevated bash after revocation", () => {
     const lifetime = new AbortController();
-    const client = sharingPolicyClient({
-      user: verifiedProfile,
-      scopes: ["operator.read", "operator.write"],
-    });
+    const client = sharingPolicyClient({ user: verifiedProfile, scopes });
     client.connectionSignal = lifetime.signal;
     const authority = resolveTalkAgentConsultAuthority(client.connect.scopes, client);
 

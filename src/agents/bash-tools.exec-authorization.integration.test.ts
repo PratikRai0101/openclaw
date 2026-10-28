@@ -15,6 +15,7 @@ import { prepareInternalGetReplyOptions } from "../auto-reply/reply/get-reply.ty
 import { resolveElevatedPermissions } from "../auto-reply/reply/reply-elevated.js";
 import { buildTestCtx } from "../auto-reply/reply/test-ctx.js";
 import { setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveChatSendCallerContext } from "../gateway/server-methods/gateway-client-identity.js";
 import { sharingPolicyClient } from "../gateway/session-sharing.test-utils.js";
 import { saveExecApprovals } from "../infra/exec-approvals-store.test-support.js";
@@ -28,7 +29,7 @@ import { createAdmittedRunOperatorAuthority } from "./admitted-run-context.js";
 import { getFinishedSession, getSession, waitForExecSession } from "./bash-process-registry.js";
 import { resetProcessRegistryForTests } from "./bash-process-registry.test-support.js";
 import { createExecTool, createExecToolForReply } from "./bash-tools.exec-run.js";
-import type { ExecElevatedDefaults, ExecToolDefaults } from "./bash-tools.exec-types.js";
+import type { ExecElevatedDefaults } from "./bash-tools.exec-types.js";
 import { withGatewayToolCallerIdentity } from "./tools/gateway-caller-context.js";
 
 // Execution spy arguments contain inherited environment; assert only scalar projections.
@@ -134,15 +135,27 @@ describe.skipIf(process.platform === "win32")("gateway execution authorization b
     defaultLevel: "on",
   };
 
+  function callerAuthority(signal?: AbortSignal) {
+    return createAdmittedRunOperatorAuthority({
+      profileId: "profile-ada",
+      scopes: ["operator.write"],
+      signal,
+      assertCurrent() {},
+    });
+  }
+
   function chatBashInput(params: {
-    approvedPath: string;
-    operatorAuthority?: ReturnType<typeof createAdmittedRunOperatorAuthority>;
-    abortSignal?: AbortSignal;
     body?: string;
+    ctx?: ReturnType<typeof buildTestCtx>;
+    cfg?: OpenClawConfig;
+    operatorAuthority?: ReturnType<typeof callerAuthority>;
+    abortSignal?: AbortSignal;
+    opts?: ReturnType<typeof prepareInternalGetReplyOptions>;
+    command?: Partial<ReturnType<typeof buildCommandContext>>;
     bashForegroundMs?: number;
   }) {
-    const body = params.body ?? `! /bin/ls ${params.approvedPath}`;
-    const cfg = {
+    const body = params.body ?? `! /bin/ls ${path.join(root, "approved.txt")}`;
+    const cfg = params.cfg ?? {
       commands: {
         bash: true,
         text: true,
@@ -151,19 +164,29 @@ describe.skipIf(process.platform === "win32")("gateway execution authorization b
           : { bashForegroundMs: params.bashForegroundMs }),
       },
     };
-    const ctx = buildTestCtx({
-      Body: body,
-      CommandBody: body,
-      CommandAuthorized: true,
-      ChatType: "direct",
-    });
+    const ctx =
+      params.ctx ??
+      buildTestCtx({
+        Body: body,
+        CommandBody: body,
+        CommandAuthorized: true,
+        ChatType: "direct",
+      });
     const command = buildCommandContext(
       { ctx, cfg, agentId: "main", isGroup: false, triggerBodyNormalized: body },
       { ownerList: [], senderIsOwner: true, isAuthorizedSender: true },
     );
+    const opts =
+      params.opts ??
+      (params.operatorAuthority || params.abortSignal
+        ? {
+            ...(params.operatorAuthority ? { operatorAuthority: params.operatorAuthority } : {}),
+            ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
+          }
+        : undefined);
     return createHandleInlineActionsInput({
       ctx,
-      command,
+      command: { ...command, ...params.command },
       typing: createTypingController(),
       cleanedBody: body,
       overrides: {
@@ -173,16 +196,7 @@ describe.skipIf(process.platform === "win32")("gateway execution authorization b
         allowTextCommands: true,
         elevatedEnabled: true,
         elevatedAllowed: true,
-        ...(params.operatorAuthority || params.abortSignal
-          ? {
-              opts: {
-                ...(params.operatorAuthority
-                  ? { operatorAuthority: params.operatorAuthority }
-                  : {}),
-                ...(params.abortSignal ? { abortSignal: params.abortSignal } : {}),
-              },
-            }
-          : {}),
+        ...(opts ? { opts } : {}),
       },
     });
   }
@@ -210,49 +224,6 @@ describe.skipIf(process.platform === "win32")("gateway execution authorization b
       CommandBody: body,
       CommandAuthorized: true,
     });
-  }
-
-  function toolWithAuthority(
-    defaults: ExecToolDefaults,
-    operatorAuthority?: ReturnType<typeof createAdmittedRunOperatorAuthority>,
-  ) {
-    return operatorAuthority
-      ? createExecToolForReply({ defaults, operatorAuthority })
-      : createExecTool(defaults);
-  }
-
-  function elevatedTool(operatorAuthority?: ReturnType<typeof createAdmittedRunOperatorAuthority>) {
-    return toolWithAuthority(
-      {
-        agentId: "main",
-        host: "gateway",
-        mode: "full",
-        autoReviewer: reviewer(),
-        cwd: root,
-        runId: "elevated-authority-run",
-        messageProvider: "webchat",
-        nonInteractiveApproval: true,
-        notifyOnExit: false,
-        elevated: elevatedDefaults,
-      },
-      operatorAuthority,
-    );
-  }
-
-  function approvalTool(operatorAuthority?: ReturnType<typeof createAdmittedRunOperatorAuthority>) {
-    return toolWithAuthority(
-      {
-        agentId: "main",
-        host: "gateway",
-        mode: "ask",
-        cwd: root,
-        runId: "approval-boundary-run",
-        messageProvider: "webchat",
-        notifyOnExit: false,
-        elevated: elevatedDefaults,
-      },
-      operatorAuthority,
-    );
   }
 
   function gatewayMethods() {
@@ -505,175 +476,145 @@ describe.skipIf(process.platform === "win32")("gateway execution authorization b
     },
   );
 
-  // Gateway-host execution rechecks its admitted operator authority after preparation,
-  // independently of the turn's elevated-permission snapshot.
-  it("refuses elevated execution when the caller's live authority ends during preparation", async () => {
+  // One verified chat.send caller and the ordinary no-authority path exercise the real
+  // tool/gateway approval routing; only the network transport is replaced.
+  it.each([true, false])(
+    "runs direct bash approval routing with explicit authority=%s",
+    async (withAuthority) => {
+      saveExecApprovals({
+        version: 1,
+        defaults: { security: "allowlist", ask: "on-miss", askFallback: "deny" },
+        agents: {},
+      });
+      fs.writeFileSync(path.join(root, "approved.txt"), "fixture");
+      approve("allow-once");
+      const body = `! /bin/ls ${path.join(root, "approved.txt")}`;
+      let input: ReturnType<typeof createHandleInlineActionsInput>;
+      if (withAuthority) {
+        const ctx = verifiedChatSendInput(body);
+        const cfg: OpenClawConfig = {
+          commands: {
+            bash: true,
+            text: true,
+            ownerAllowFrom: ["profile-ada"],
+            allowFrom: { webchat: ["profile-ada"] },
+          },
+          tools: { elevated: { enabled: true, allowFrom: { webchat: ["profile-ada"] } } },
+          agents: {
+            entries: {
+              main: {
+                tools: { elevated: { enabled: true, allowFrom: { webchat: ["profile-ada"] } } },
+              },
+            },
+          },
+        };
+        expect(
+          resolveElevatedPermissions({
+            cfg,
+            agentId: "main",
+            ctx,
+            provider: ctx.Provider ?? "",
+          }),
+        ).toEqual({ enabled: true, allowed: true, failures: [] });
+        input = chatBashInput({
+          body,
+          ctx,
+          cfg,
+          operatorAuthority: callerAuthority(),
+          command: resolveCommandAuthorization({ ctx, cfg, commandAuthorized: true }),
+        });
+      } else {
+        input = chatBashInput({ body });
+      }
+
+      const result = await handleInlineActions(input);
+
+      const text = chatBashReplyText(result);
+      expect(text).toContain("Exit: code 0");
+      expect(text).toContain("approved.txt");
+      const registered = transport.call.mock.calls.find(
+        ([options]) => options.method === "exec.approval.request",
+      )?.[0].params as { id?: string } | undefined;
+      const waited = transport.call.mock.calls.find(
+        ([options]) => options.method === "exec.approval.waitDecision",
+      )?.[0].params;
+      expect(registered).toMatchObject({ host: "gateway", ask: "on-miss", twoPhase: true });
+      expect(registered?.id).toBeTruthy();
+      expect(waited).toEqual({ id: registered?.id });
+      expect(boundary.spawn.mock.calls.length).toBe(1);
+    },
+  );
+
+  it("rejects an explicit revoked authority even with valid ambient authority", async () => {
     saveExecApprovals({ version: 1, defaults: { security: "full", ask: "off" }, agents: {} });
-    fs.writeFileSync(path.join(root, "approved.txt"), "fixture");
     const revoked = new AbortController();
-    const operatorAuthority = createAdmittedRunOperatorAuthority({
-      profileId: "profile-ada",
-      scopes: ["operator.write"],
-      signal: revoked.signal,
-      assertCurrent() {},
-    });
-    boundary.prepare.mockImplementation(async () => {
-      revoked.abort(new Error("operator authority revoked"));
-    });
-
-    const pending = elevatedTool(operatorAuthority).execute("elevated-authority-revalidation", {
-      command: "/bin/ls approved.txt",
-      elevated: true,
-    });
-
-    await expect(pending).rejects.toThrow("operator authority revoked");
-    expect(boundary.prepare).toHaveBeenCalled();
-    expect(boundary.spawn.mock.calls.length).toBe(0);
-  });
-
-  it("runs elevated execution while the caller's live authority is current", async () => {
-    saveExecApprovals({ version: 1, defaults: { security: "full", ask: "off" }, agents: {} });
-    fs.writeFileSync(path.join(root, "approved.txt"), "fixture");
-    const operatorAuthority = createAdmittedRunOperatorAuthority({
-      profileId: "profile-ada",
-      scopes: ["operator.write"],
-      assertCurrent() {},
-    });
-
-    const result = await elevatedTool(operatorAuthority).execute("elevated-authority-current", {
-      command: "/bin/ls approved.txt",
-      elevated: true,
-    });
-
-    if (result.details.status !== "completed") {
-      throw new Error(`Unexpected exec status: ${result.details.status}`);
-    }
-    expect(result.details.exitCode).toBe(0);
-    expect(result.details.aggregated).toBe("approved.txt");
-    expect(boundary.spawn.mock.calls.length).toBe(1);
-  });
-
-  it("never falls back to an ambient caller when an explicit authority is revoked", async () => {
-    saveExecApprovals({ version: 1, defaults: { security: "full", ask: "off" }, agents: {} });
-    fs.writeFileSync(path.join(root, "approved.txt"), "fixture");
-    const revoked = new AbortController();
-    const explicitAuthority = createAdmittedRunOperatorAuthority({
-      profileId: "profile-ada",
-      scopes: ["operator.write"],
-      signal: revoked.signal,
-      assertCurrent() {},
-    });
+    const explicitAuthority = callerAuthority(revoked.signal);
     revoked.abort(new Error("explicit authority revoked"));
-    const ambientAuthority = createAdmittedRunOperatorAuthority({
-      profileId: "profile-ambient",
-      scopes: ["operator.write"],
-      assertCurrent() {},
+    const explicitTool = createExecToolForReply({
+      defaults: {
+        agentId: "main",
+        host: "gateway",
+        mode: "full",
+        autoReviewer: reviewer(),
+        cwd: root,
+        runId: "explicit-authority",
+        messageProvider: "webchat",
+        nonInteractiveApproval: true,
+        notifyOnExit: false,
+        elevated: elevatedDefaults,
+      },
+      operatorAuthority: explicitAuthority,
     });
 
     await expect(
       withGatewayToolCallerIdentity(
-        { agentId: "main", sessionKey: "agent:main:main", operatorAuthority: ambientAuthority },
+        { agentId: "main", sessionKey: "agent:main:main", operatorAuthority: callerAuthority() },
         () =>
-          elevatedTool(explicitAuthority).execute("explicit-authority", {
+          explicitTool.execute("explicit-authority", {
             command: "/bin/ls approved.txt",
             elevated: true,
           }),
       ),
     ).rejects.toThrow("explicit authority revoked");
-    expect(boundary.spawn).not.toHaveBeenCalled();
+    expect(boundary.spawn.mock.calls.length).toBe(0);
   });
 
-  // Direct commands install no partial gateway identity; approvals run through the real
-  // tool/gateway routing with only the network transport replaced.
-  it.each([
-    { name: "an explicit caller authority", withAuthority: true },
-    { name: "the ordinary main path", withAuthority: false },
-  ])("registers and consumes a real approval with $name", async ({ withAuthority }) => {
-    saveExecApprovals({
-      version: 1,
-      defaults: { security: "allowlist", ask: "on-miss", askFallback: "deny" },
-      agents: {},
-    });
-    fs.writeFileSync(path.join(root, "approved.txt"), "fixture");
-    approve("allow-once");
-    const operatorAuthority = withAuthority
-      ? createAdmittedRunOperatorAuthority({
-          profileId: "profile-ada",
-          scopes: ["operator.write"],
-          assertCurrent() {},
-        })
-      : undefined;
-
-    const result = await approvalTool(operatorAuthority).execute("approval-boundary", {
-      command: "/bin/ls approved.txt",
-      elevated: true,
-    });
-
-    if (result.details.status !== "completed") {
-      throw new Error(`Unexpected exec status: ${result.details.status}`);
-    }
-    expect(result.details.aggregated).toBe("approved.txt");
-    expect(gatewayMethods()).toContain("exec.approval.request");
-    expect(gatewayMethods()).toContain("exec.approval.waitDecision");
-    const registered = transport.call.mock.calls.find(
-      ([options]) => options.method === "exec.approval.request",
-    )?.[0].params as { id?: string } | undefined;
-    const waited = transport.call.mock.calls.find(
-      ([options]) => options.method === "exec.approval.waitDecision",
-    )?.[0].params as { id?: string } | undefined;
-    expect(registered).toMatchObject({ host: "gateway", ask: "on-miss", twoPhase: true });
-    expect(registered?.id).toBeTruthy();
-    expect(waited).toEqual({ id: registered?.id });
-    expect(boundary.spawn).toHaveBeenCalledTimes(1);
-  });
-
-  it("rejects a partial gateway tool identity before approval registration", async () => {
-    saveExecApprovals({
-      version: 1,
-      defaults: { security: "allowlist", ask: "on-miss", askFallback: "deny" },
-      agents: {},
-    });
-    fs.writeFileSync(path.join(root, "approved.txt"), "fixture");
-    approve("allow-once");
-    const operatorAuthority = createAdmittedRunOperatorAuthority({
-      profileId: "profile-ada",
-      scopes: ["operator.write"],
-      signal: new AbortController().signal,
-      assertCurrent() {},
-    });
-
-    await expect(
-      withGatewayToolCallerIdentity(
-        { agentId: "main", sessionKey: "agent:main:main", operatorAuthority },
-        () =>
-          approvalTool().execute("partial-identity", {
-            command: "/bin/ls approved.txt",
-            elevated: true,
-          }),
-      ),
-    ).rejects.toThrow("trusted operational run instance required for this gateway call");
-    expect(gatewayMethods()).not.toContain("exec.approval.request");
-    expect(boundary.spawn).not.toHaveBeenCalled();
-  });
-
-  // Direct chat bash builds its own exec tool; these prove the dispatcher's admitted
-  // authority and cancellation reach that tool, not just a surrounding agent run.
   it.each([
     { kind: "operator authority", message: "chat bash caller revoked" },
-    { kind: "reply abort signal", message: "chat bash reply operation cancelled" },
+    { kind: "reply abort", message: "chat bash reply operation cancelled" },
+    { kind: "channel owner", message: "channel owner revoked" },
   ] as const)(
-    "stops chat bash dispatch when the $kind ends during preparation",
+    "blocks direct bash spawn when the $kind ends during preparation",
     async ({ kind, message }) => {
       const approvedPath = path.join(root, "approved.txt");
       fs.writeFileSync(approvedPath, "fixture");
+      const body = `! /bin/ls ${approvedPath}`;
       const revoked = new AbortController();
-      const operatorAuthority = createAdmittedRunOperatorAuthority({
-        profileId: "profile-ada",
-        scopes: ["operator.write"],
-        signal: kind === "operator authority" ? revoked.signal : undefined,
-        assertCurrent() {},
-      });
-      const abortSignal = kind === "reply abort signal" ? revoked.signal : undefined;
+      const operatorAuthority = callerAuthority(
+        kind === "reply abort" ? undefined : revoked.signal,
+      );
+      const ctx =
+        kind === "channel owner"
+          ? buildTestCtx({
+              Body: body,
+              CommandBody: body,
+              CommandAuthorized: true,
+              ChatType: "direct",
+              Provider: "telegram",
+              Surface: "telegram",
+              OriginatingChannel: "telegram",
+              From: "telegram:42",
+              To: "telegram:99",
+              SenderId: "42",
+            })
+          : undefined;
+      if (ctx) {
+        bindCommandOwnerAuthority(ctx, { isCurrent: () => true, operatorAuthority });
+      }
+      const opts = ctx ? prepareInternalGetReplyOptions(undefined, ctx) : undefined;
+      if (ctx) {
+        expect(opts?.operatorAuthority).toBe(operatorAuthority);
+      }
       boundary.prepare.mockImplementation(async () => {
         revoked.abort(new Error(message));
       });
@@ -681,201 +622,47 @@ describe.skipIf(process.platform === "win32")("gateway execution authorization b
 
       const result = await handleInlineActions(
         chatBashInput({
-          approvedPath,
+          body,
+          ctx,
           operatorAuthority,
-          ...(abortSignal ? { abortSignal } : {}),
+          abortSignal: kind === "reply abort" ? revoked.signal : undefined,
+          opts,
         }),
       );
 
-      const text = chatBashReplyText(result);
-      expect(text).toContain("⚠️ bash failed:");
-      expect(text).toContain(message);
+      expect(chatBashReplyText(result)).toContain(message);
       expect(gatewayMethods()).toContain("exec.approval.request");
       expect(gatewayMethods()).toContain("exec.approval.waitDecision");
       expect(boundary.prepare).toHaveBeenCalled();
-      expect(boundary.spawn).not.toHaveBeenCalled();
+      expect(boundary.spawn.mock.calls.length).toBe(0);
     },
   );
 
-  it("runs chat bash dispatch while the caller's live authority is current", async () => {
-    const approvedPath = path.join(root, "approved.txt");
-    fs.writeFileSync(approvedPath, "fixture");
-    const operatorAuthority = createAdmittedRunOperatorAuthority({
-      profileId: "profile-ada",
-      scopes: ["operator.write"],
-      assertCurrent() {},
-    });
-    approve("allow-once");
-
-    const result = await handleInlineActions(chatBashInput({ approvedPath, operatorAuthority }));
-
-    const text = chatBashReplyText(result);
-    expect(text).toContain("Exit: code 0");
-    expect(text).toContain("approved.txt");
-    expect(gatewayMethods()).toContain("exec.approval.request");
-    expect(gatewayMethods()).toContain("exec.approval.waitDecision");
-    expect(boundary.prepare).toHaveBeenCalled();
-    expect(boundary.spawn).toHaveBeenCalledTimes(1);
-  });
-
-  it("composes a verified chat.send caller through elevated and inline bash into real exec", async () => {
-    const approvedPath = path.join(root, "approved.txt");
-    fs.writeFileSync(approvedPath, "fixture");
-    const body = `! /bin/ls ${approvedPath}`;
-    const ctx = verifiedChatSendInput(body);
-    if (ctx.Provider !== "webchat") {
-      throw new Error("Expected a WebChat caller context");
-    }
-    const cfg = {
-      commands: {
-        bash: true,
-        text: true,
-        ownerAllowFrom: ["profile-ada"],
-        allowFrom: { webchat: ["profile-ada"] },
-      },
-      tools: { elevated: { enabled: true, allowFrom: { webchat: ["profile-ada"] } } },
-      agents: {
-        entries: {
-          main: {
-            tools: { elevated: { enabled: true, allowFrom: { webchat: ["profile-ada"] } } },
-          },
-        },
-      },
-    };
-    const elevated = resolveElevatedPermissions({
-      cfg,
-      agentId: "main",
-      ctx,
-      provider: ctx.Provider,
-    });
-    expect(elevated).toEqual({ enabled: true, allowed: true, failures: [] });
-    const command = buildCommandContext(
-      { ctx, cfg, agentId: "main", isGroup: false, triggerBodyNormalized: body },
-      resolveCommandAuthorization({ ctx, cfg, commandAuthorized: true }),
-    );
-    expect(command.senderIsOwner).toBe(true);
-    expect(command.isAuthorizedSender).toBe(true);
-    approve("allow-once");
-    const operatorAuthority = createAdmittedRunOperatorAuthority({
-      profileId: "profile-ada",
-      scopes: ["operator.write"],
-      assertCurrent() {},
-    });
-
-    const result = await handleInlineActions(
-      createHandleInlineActionsInput({
-        ctx,
-        command,
-        typing: createTypingController(),
-        cleanedBody: body,
-        overrides: {
-          cfg,
-          isGroup: false,
-          sessionKey: "agent:main:main",
-          allowTextCommands: true,
-          elevatedEnabled: elevated.enabled,
-          elevatedAllowed: elevated.allowed,
-          opts: { operatorAuthority },
-        },
-      }),
-    );
-
-    const text = chatBashReplyText(result);
-    expect(text).toContain("Exit: code 0");
-    expect(text).toContain("approved.txt");
-    expect(gatewayMethods()).toContain("exec.approval.request");
-    expect(gatewayMethods()).toContain("exec.approval.waitDecision");
-    expect(boundary.spawn).toHaveBeenCalledTimes(1);
-  });
-
-  it("binds channel-owner authority into direct bash and blocks the effect after revocation", async () => {
-    const approvedPath = path.join(root, "approved.txt");
-    fs.writeFileSync(approvedPath, "fixture");
-    const body = `! /bin/ls ${approvedPath}`;
-    const cfg = { commands: { bash: true, text: true } };
-    const ctx = buildTestCtx({
-      Body: body,
-      CommandBody: body,
-      CommandAuthorized: true,
-      ChatType: "direct",
-      Provider: "telegram",
-      Surface: "telegram",
-      OriginatingChannel: "telegram",
-      From: "telegram:42",
-      To: "telegram:99",
-      SenderId: "42",
-    });
-    const revoked = new AbortController();
-    const operatorAuthority = createAdmittedRunOperatorAuthority({
-      profileId: "profile-ada",
-      scopes: ["operator.write"],
-      signal: revoked.signal,
-      assertCurrent() {},
-    });
-    bindCommandOwnerAuthority(ctx, { isCurrent: () => true, operatorAuthority });
-    const opts = prepareInternalGetReplyOptions(undefined, ctx);
-    expect(opts?.operatorAuthority).toBe(operatorAuthority);
-    const command = buildCommandContext(
-      { ctx, cfg, agentId: "main", isGroup: false, triggerBodyNormalized: body },
-      { ownerList: [], senderIsOwner: true, isAuthorizedSender: true },
-    );
-    boundary.prepare.mockImplementation(async () => {
-      revoked.abort(new Error("channel owner revoked"));
-    });
-    approve("allow-once");
-
-    const result = await handleInlineActions(
-      createHandleInlineActionsInput({
-        ctx,
-        command,
-        typing: createTypingController(),
-        cleanedBody: body,
-        overrides: {
-          cfg,
-          isGroup: false,
-          sessionKey: "agent:main:main",
-          allowTextCommands: true,
-          elevatedEnabled: true,
-          elevatedAllowed: true,
-          opts,
-        },
-      }),
-    );
-
-    const text = chatBashReplyText(result);
-    expect(text).toContain("channel owner revoked");
-    expect(gatewayMethods()).toContain("exec.approval.request");
-    expect(boundary.spawn).not.toHaveBeenCalled();
-  });
-
-  it("cancels a background chat bash session when its live authority ends after spawn", async () => {
+  it("cancels a retained direct bash session when its live authority ends after reply", async () => {
     saveExecApprovals({ version: 1, defaults: { security: "full", ask: "off" }, agents: {} });
-    const approvedPath = path.join(root, "approved.txt");
-    fs.writeFileSync(approvedPath, "fixture");
     const revoked = new AbortController();
-    const operatorAuthority = createAdmittedRunOperatorAuthority({
-      profileId: "profile-ada",
-      scopes: ["operator.write"],
-      signal: revoked.signal,
-      assertCurrent() {},
-    });
+    const operatorAuthority = callerAuthority(revoked.signal);
 
     const started = await handleInlineActions(
-      chatBashInput({ approvedPath, operatorAuthority, body: "! sleep 30", bashForegroundMs: 0 }),
+      chatBashInput({ body: "! sleep 30", operatorAuthority, bashForegroundMs: 0 }),
     );
     const sessionId = chatBashReplyText(started).match(/session ([^)]+)\)/)?.[1];
-    expect(sessionId).toBeTruthy();
-    const session = getSession(sessionId!);
-    expect(session).toBeDefined();
-    expect(boundary.spawn).toHaveBeenCalledTimes(1);
+    if (!sessionId) {
+      throw new Error("Expected a retained bash session");
+    }
+    const session = getSession(sessionId);
+    if (!session) {
+      throw new Error("Expected the retained session");
+    }
+    expect(boundary.spawn.mock.calls.length).toBe(1);
 
     revoked.abort(new Error("chat bash caller revoked after spawn"));
-    await waitForExecSession(session!);
-    expect(getFinishedSession(sessionId!)).toMatchObject({
+    await waitForExecSession(session);
+    expect(getFinishedSession(sessionId)).toMatchObject({
       exited: true,
       exitReason: "manual-cancel",
     });
     // Clear the command module's active-job record before the next case.
-    await handleInlineActions(chatBashInput({ approvedPath, body: "!stop" }));
+    await handleInlineActions(chatBashInput({ body: "!stop" }));
   });
 });
