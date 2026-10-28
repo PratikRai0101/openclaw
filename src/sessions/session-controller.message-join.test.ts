@@ -38,10 +38,46 @@ import {
 } from "./session-controller.message-injection.js";
 import { prepareReplyMessageJoin } from "./session-controller.message-join.js";
 import { testing } from "./session-controller.test-support.js";
+import { createReplyTurnParticipants } from "./session-controller.tool-authority.js";
 
 afterEach(() => testing.resetSessionControllerForTest());
 
+it("copies private turn participants and freezes only their shared command target", () => {
+  let current = true;
+  const authority = createAdmittedRunOperatorAuthority({
+    profileId: "participant",
+    scopes: ["operator.read"],
+    assertCurrent() {
+      if (!current) {
+        throw new Error("revoked");
+      }
+    },
+  });
+  const freeze = vi.spyOn(Object, "freeze");
+  const participants = createReplyTurnParticipants({
+    operatorAuthority: authority,
+    senderId: "original",
+    gatewayUiCommandTarget: { connId: "original", profileId: "participant" },
+  });
+  try {
+    expect(freeze).toHaveBeenCalledTimes(1);
+    const exposed = participants.resolve()!;
+    Object.assign(exposed, { senderId: "changed", name: "changed" });
+    expect(Reflect.set(exposed.gatewayUiCommandTarget!, "connId", "changed")).toBe(false);
+    expect(participants.resolve()).toMatchObject({
+      senderId: "original",
+      gatewayUiCommandTarget: { connId: "original", profileId: "participant" },
+    });
+    current = false;
+    expect(() => exposed.assertCurrent()).toThrow("access changed");
+  } finally {
+    freeze.mockRestore();
+    participants.close();
+  }
+});
+
 type JoinCase = {
+  differentConversation?: true;
   predecessor?: boolean | "pending";
   claim?: "before" | "after" | "added";
   source?: false;
@@ -50,16 +86,8 @@ type JoinCase = {
   headless?: true;
   caps?: "expand" | "narrow" | "protocol";
   target?: "new" | "removed" | "foreign";
-  mismatch?:
-    | "binding"
-    | "profile"
-    | "tools"
-    | "elevation"
-    | "exec"
-    | "workspace"
-    | "cwd"
-    | "scopes";
-  after?: "settings" | "activity" | "revoke" | "backend" | "delivery";
+  mismatch?: "profile" | "tools" | "elevation" | "exec" | "workspace" | "cwd" | "scopes";
+  after?: "settings" | "activity" | "revoke" | "caller-revoke" | "backend" | "delivery";
   sessionOnly?: true;
 };
 type Outcome = "accepted" | "deferred" | "rejected" | "revoked";
@@ -95,22 +123,27 @@ it.each<[string, Outcome, JoinCase?]>([
   ["caps-only", "accepted", { headless: true, caps: "expand" }],
   ["headless-to-web", "accepted", { headless: true, caps: "expand", target: "new" }],
   ["protocol-only", "accepted", { caps: "protocol" }],
-  ["narrower caps", "deferred", { caps: "narrow" }],
+  ["narrower caps", "accepted", { caps: "narrow" }],
+  [
+    "another conversation with changed policy",
+    "deferred",
+    { mismatch: "tools", differentConversation: true },
+  ],
   ["new target", "accepted", { headless: true, target: "new" }],
-  ["removed target", "deferred", { target: "removed" }],
-  ["changed non-owner target", "deferred", { target: "foreign" }],
-  ["changed binding", "deferred", { mismatch: "binding" }],
+  ["removed target", "accepted", { target: "removed" }],
+  ["changed non-owner target", "accepted", { target: "foreign" }],
   ["cross-profile caps", "deferred", { headless: true, caps: "expand", mismatch: "profile" }],
   ["missing selection compatible", "accepted", { legacy: true }],
   ["missing selection expanded caps", "deferred", { legacy: true, caps: "expand" }],
   ["session-only", "accepted", { sessionOnly: true }],
-  ["current tool policy", "deferred", { mismatch: "tools" }],
+  ["current tool policy", "accepted", { mismatch: "tools" }],
   ["saved elevation", "deferred", { mismatch: "elevation" }],
   ["exec configuration", "deferred", { mismatch: "exec" }],
   ["workspace", "deferred", { mismatch: "workspace" }],
   ["saved working directory", "deferred", { mismatch: "cwd" }],
-  ["narrowed scopes", "deferred", { mismatch: "scopes" }],
+  ["narrowed scopes", "accepted", { mismatch: "scopes" }],
   ["revoked after preparation", "revoked", { after: "revoke" }],
+  ["incoming authority revoked independently", "rejected", { after: "caller-revoke" }],
   ["replaced backend", "rejected", { after: "backend" }],
   ["saved settings after preparation", "rejected", { after: "settings" }],
   ["activity after preparation", "accepted", { after: "activity" }],
@@ -161,12 +194,8 @@ it.each<[string, Outcome, JoinCase?]>([
         run.run.authProfileIdSource = c.profile === "auto" ? "auto" : undefined;
       }
       const original = structuredClone([run.run.clientCaps, run.run.gatewayUiCommandTarget]);
-      let sourceCurrent = true;
-      const assertSource = () => {
-        if (!sourceCurrent) {
-          throw new Error("Caller revoked");
-        }
-      };
+      const sourceRevocation = new AbortController();
+      const assertSource = () => sourceRevocation.signal.throwIfAborted();
       const operatorAuthority = createAdmittedRunOperatorAuthority({
         profileId: "join-owner",
         scopes: ["operator.admin"],
@@ -230,15 +259,19 @@ it.each<[string, Outcome, JoinCase?]>([
                 }),
           },
         };
+        const incomingRevocation = new AbortController();
+        if (c.after === "caller-revoke") {
+          incoming.operatorAuthority = createAdmittedRunOperatorAuthority({
+            ...operatorAuthority,
+            source: {},
+            assertCurrent: () => incomingRevocation.signal.throwIfAborted(),
+          });
+        }
         if (c.caps) {
-          incoming.run.clientCaps =
-            c.caps === "narrow"
-              ? []
-              : [
-                  ...(c.caps === "expand" ? (run.run.clientCaps ?? []) : []),
-                  "ui-commands",
-                  "usage-refreshing",
-                ];
+          incoming.run.clientCaps = c.caps === "narrow" ? [] : ["ui-commands", "usage-refreshing"];
+        }
+        if (c.differentConversation) {
+          incoming.run.conversationId = "different-conversation";
         }
         if (c.target) {
           incoming.run.gatewayUiCommandTarget =
@@ -250,9 +283,6 @@ it.each<[string, Outcome, JoinCase?]>([
         }
         if (c.profile === "pin" || c.profile === "auto") {
           incoming.run.authProfileId = "synthetic-profile-b";
-        }
-        if (c.mismatch === "binding") {
-          incoming.run.toolBindings = { synthetic: "different-binding" };
         }
         if (c.mismatch === "tools") {
           incoming.run.config = { ...cfg, tools: { deny: ["exec"] } };
@@ -347,7 +377,7 @@ it.each<[string, Outcome, JoinCase?]>([
           return;
         }
         if (c.after === "revoke") {
-          sourceCurrent = false;
+          sourceRevocation.abort(new Error("Caller revoked"));
         }
         if (c.after === "settings" || c.after === "activity") {
           const settings = c.after === "settings";
@@ -370,6 +400,15 @@ it.each<[string, Outcome, JoinCase?]>([
           operation.attachBackend({ ...backend, queueMessage: replacement });
         }
         try {
+          if (c.after === "caller-revoke") {
+            incomingRevocation.abort(new Error("Incoming caller revoked"));
+            assertSource();
+            operatorAuthority.assertCurrent();
+            await expect(joined.prepareCurrent()).rejects.toThrow("Incoming caller revoked");
+            expect(delivered).not.toHaveBeenCalled();
+            assertFrozen();
+            return;
+          }
           if (outcome === "revoked") {
             const refused = await beginReplyMessageInjectionTarget(target, incoming.prompt, {
               assertCurrent: assertSource,
@@ -383,9 +422,7 @@ it.each<[string, Outcome, JoinCase?]>([
             expect(replacement).not.toHaveBeenCalled();
             return;
           }
-          const readAuthority = () => {
-            joined.toolAuthority.read();
-          };
+          const readAuthority = joined.toolAuthority.read;
           const closed = c.after === "delivery";
           const unobserved = c.predecessor && c.legacy;
           const attempt = await beginReplyMessageInjectionTarget(target, incoming.prompt, {

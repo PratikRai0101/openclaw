@@ -209,6 +209,38 @@ function patch(snapshot: SessionActorHotState, updatedAt: number): Mutation {
   };
 }
 
+it.each(["matching", "stale"] as const)(
+  "uses a %s entry reference without hiding a changed commit entry",
+  async (revision) => {
+    await withActor(async (f) => {
+      const initial = f.read();
+      const command = patch(initial, 123);
+      command.input.entryReference =
+        revision === "matching" ? initial.writeToken : "stale-revision";
+      await f.prepare(command);
+      const snapshots: unknown[] = [];
+      f.hooks.admit = (stage, facts) => {
+        snapshots.push(facts);
+        if (stage === "commit") {
+          expect(facts).toMatchObject({ snapshot: { entry: { updatedAt: 123 } } });
+          throw new Error("Changed entry refused by live policy");
+        }
+      };
+      expect(f.mutate(command)).toMatchObject({
+        kind: "rolled-back",
+        error: { message: "Changed entry refused by live policy" },
+      });
+      expect(snapshots[0]).toMatchObject({
+        snapshot:
+          revision === "matching"
+            ? { entryReference: initial.writeToken }
+            : { entry: initial.entry },
+      });
+      expect(f.nativeEntry()).toEqual(initial.entry);
+    });
+  },
+);
+
 it("hydrates a cold command inside its transaction and returns a retryable preimage without rereading", () =>
   withActor(async (f) => {
     const command: Mutation = {
@@ -422,6 +454,7 @@ it("adopts a run only under the exact lifecycle and current transaction and comm
 
 it.each([
   { phase: "acceptInput", initial: true, cold: false },
+  { phase: "acceptInput", initial: false, cold: false },
   { phase: "adoptRun", initial: false, cold: false },
   { phase: "acceptInput", initial: false, cold: true },
 ] as const)(
@@ -460,6 +493,7 @@ it.each([
         expected: before?.version,
         commandId: "accept-transcript",
         phaseId: "input",
+        entryReference: before?.writeToken,
         expectedState,
         lifecycle,
         turn,
@@ -469,8 +503,9 @@ it.each([
           ? { type: "session.actor.acceptInput", input }
           : { type: "session.actor.adoptRun", input: { ...input, sessionId } };
       await f.prepare(command);
-      expectCommitted(f.mutate(command));
-      expect(f.read(target)).toMatchObject({
+      const committed = expectCommitted(f.mutate(command));
+      expect(committed.receipt.postimage).toEqual(f.read(target));
+      expect(committed.receipt.postimage).toMatchObject({
         entry: { sessionId, ...lifecycle },
         pendingInputs: [],
       });

@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import { GATEWAY_OWNER_PROFILE_ID } from "../../../packages/gateway-protocol/src/schema/user-profile-constants.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { sharingPolicyClient } from "../session-sharing.test-utils.js";
-import { resolveTalkAgentConsultAuthority } from "./client-gateway-control.js";
-import { prepareTalkClientToolContext } from "./client-tool-authority.js";
+import {
+  prepareTalkClientToolContext,
+  resolveTalkAgentConsultAuthority,
+} from "./client-tool-authority.js";
 
 const verifiedProfile = "profile-ada";
 const allowFrom = { webchat: [verifiedProfile, GATEWAY_OWNER_PROFILE_ID] };

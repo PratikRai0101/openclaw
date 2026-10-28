@@ -188,7 +188,7 @@ function resolvePrExemptChangedTargets(changedPaths: readonly string[], cwd: str
   // transitive imports cover subjects reached through shared integration fixtures.
   const targets = new Set(
     [
-      ...resolvePolicyTestTargets(paths),
+      ...resolvePolicyTestTargets(paths, { cwd }),
       ...resolveChangedTestTargetPlan(paths, {
         broad: false,
         combineSiblingWithImportGraph: true,
@@ -652,7 +652,7 @@ const STORAGE_MODULE_WORK_SECONDS = new Map<string, number>([
   ["src/channels/message-access/operator-authority.test.ts", 31.775],
   ["src/agents/subagents/registry/subagent-registry.persistence.test.ts", 23.639],
   ["src/auto-reply/reply/session.acp-reset-routing.test.ts", 8.938],
-  ["src/claws/package-update.test.ts", 4.164],
+  ["src/templates/package-update.test.ts", 4.164],
   ["src/cli/update-cli.git-service.test.ts", 24.578],
   ["src/flows/doctor-health.fleet-preflight.test.ts", 8.648],
   ["src/agents/embedded-agent-runner/compact.delegate.test.ts", 16.151],
@@ -1492,7 +1492,7 @@ export function resolveUiE2ePrTestSelection(
   });
   const roots = [...new Set(ownerWatches.flatMap(({ ownerRoots }) => ownerRoots))];
   const policyTargets = new Set(
-    resolvePolicyTestTargets(paths).map((file) => resolveUiTypeScriptPath(file, cwd)),
+    resolvePolicyTestTargets(paths, { cwd }).map((file) => resolveUiTypeScriptPath(file, cwd)),
   );
   const importedTargets = new Set(
     resolveAffectedTestsFromImportGraph(paths, cwd, { ...graphOptions, forceFull: true }),
@@ -1615,16 +1615,28 @@ export function createUiRealGatewayTestShards(
     (optInEnabled.get(file) === false ? 0 : (timings.fileSeconds[file] ?? 30)) +
     timings.perFileOverheadSeconds;
   const serial = files.filter((file) => !parallelFiles.has(file));
-  const serialSeconds = serial.reduce((sum, file) => sum + seconds(file), 0);
   // The desktop driver runs outside Vitest: scheduled run 39872214487 took 120s.
   const desktopSeconds = selected.has(desktop) ? (timings.fileSeconds[desktop] ?? 120) : 0;
-  const initialSeconds = Math.max(serialSeconds, desktopSeconds);
-  // Keep unqualified fixtures together. Qualified fixtures can use either job's
-  // existing two workers after its overlapping serial and desktop work joins.
-  const buckets: { workerSeconds: [number, number]; files: string[] }[] = [
-    { workerSeconds: [initialSeconds, initialSeconds], files: serial },
-    { workerSeconds: [0, 0], files: [] },
+  // Each runner keeps unqualified fixtures serial. Split that work before placing
+  // qualified fixtures so one runner does not wait behind every serial file.
+  const buckets: { serialSeconds: number; workerSeconds: [number, number]; files: string[] }[] = [
+    { serialSeconds: 0, workerSeconds: [0, 0], files: [] },
+    { serialSeconds: 0, workerSeconds: [0, 0], files: [] },
   ];
+  for (const file of serial.toSorted(
+    (left, right) => seconds(right) - seconds(left) || left.localeCompare(right),
+  )) {
+    const bucket =
+      buckets[0]!.serialSeconds <= buckets[1]!.serialSeconds ? buckets[0]! : buckets[1]!;
+    bucket.files.push(file);
+    bucket.serialSeconds += seconds(file);
+  }
+  for (const [index, bucket] of buckets.entries()) {
+    const initialSeconds = Math.max(bucket.serialSeconds, index === 0 ? desktopSeconds : 0);
+    bucket.workerSeconds = [initialSeconds, initialSeconds];
+  }
+  // Qualified fixtures use each job's existing two workers after its serial
+  // phase and, on the first runner, overlapping desktop proof have joined.
   for (const file of files
     .filter((candidate) => parallelFiles.has(candidate))
     .toSorted((left, right) => seconds(right) - seconds(left) || left.localeCompare(right))) {
